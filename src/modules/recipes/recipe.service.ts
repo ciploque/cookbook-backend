@@ -33,7 +33,7 @@ function toSearchDocument(
     slug: recipe.slug,
     title: recipe.title,
     description: recipe.description ?? null,
-    category: recipe.category,
+    category: recipe.category ?? null,
     coverImageUrl: recipe.coverImageUrl,
     imageUrls: recipe.imageUrls,
     prepTimeMinutes: recipe.prepTimeMinutes,

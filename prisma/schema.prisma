@@ -27,7 +27,7 @@ model Recipe {
   slug            String
   title           String
   description     String?
-  category        String
+  category        String?
   coverImageUrl   String?
   imageUrls       String[]
   prepTimeMinutes Int?
@@ -52,7 +52,7 @@ model RecipeIngredient {
   id       String  @id @default(uuid())
   recipeId String
   name     String
-  quantity String
+  quantity Float?
   unit     String?
   notes    String?
   order    Int     @default(0)

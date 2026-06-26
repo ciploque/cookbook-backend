@@ -7,7 +7,7 @@ export interface RecipeSearchDocument {
   slug: string;
   title: string;
   description: string | null;
-  category: string;
+  category: string | null;
   coverImageUrl: string | null;
   imageUrls: string[];
   prepTimeMinutes: number | null;

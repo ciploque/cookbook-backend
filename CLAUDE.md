@@ -32,7 +32,7 @@ npm run dev
 npm run meili:reindex
 ```
 
-Verify: `GET http://localhost:3000/health` → `{ "status": "ok", "db": "connected" }`
+Verify: `GET http://localhost:3001/health` → `{ "status": "ok", "db": "connected" }`
 
 ---
 
@@ -183,7 +183,7 @@ x-dev-user-sub: <any-string>
 This sets `req.user = { sub: "<any-string>" }` and calls `next()`. It is **never active** in `production`. Use it to test protected endpoints locally without a running Keycloak instance.
 
 ```bash
-curl -H "x-dev-user-sub: my-test-user" http://localhost:3000/api/v1/users/me
+curl -H "x-dev-user-sub: my-test-user" http://localhost:3001/api/v1/users/me
 ```
 
 ### `req.user` Type
@@ -337,7 +337,7 @@ GET /api/v1/users/joao/recipes/pasta-carbonara-a1b2
 {
   "title": "string (required, max 120)",
   "description": "string (optional, max 2000)",
-  "category": "string (required)",
+  "category": "string (optional)",
   "tags": ["string"],
   "prepTimeMinutes": "number (optional, min 0)",
   "servings": "number (optional, min 1)",
@@ -347,7 +347,7 @@ GET /api/v1/users/joao/recipes/pasta-carbonara-a1b2
   "ingredients": [
     {
       "name": "string (required)",
-      "quantity": "string (required)",
+      "quantity": "number (optional, min 0)",
       "unit": "string (optional)",
       "notes": "string (optional)"
     }
@@ -374,7 +374,7 @@ Slug is generated at creation from the title + a 4-char random suffix and is **i
   "slug": "pasta-carbonara-a1b2",
   "title": "string",
   "description": "string | null",
-  "category": "string",
+  "category": "string | null",
   "tags": ["pasta", "italian"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
@@ -383,7 +383,7 @@ Slug is generated at creation from the title + a 4-char random suffix and is **i
   "difficulty": "number | null",
   "author": { "id": "uuid", "username": "string", "displayName": "string", "avatarUrl": "string | null" },
   "ingredients": [
-    { "id": "uuid", "name": "string", "quantity": "string", "unit": "string | null", "notes": "string | null", "order": 0 }
+    { "id": "uuid", "name": "string", "quantity": "number | null", "unit": "string | null", "notes": "string | null", "order": 0 }
   ],
   "steps": [
     { "id": "uuid", "order": 1, "instruction": "string", "imageUrl": "string | null" }
@@ -402,7 +402,7 @@ Abbreviated — no full steps or ingredients:
   "slug": "string",
   "title": "string",
   "description": "string (truncated to 200 chars)",
-  "category": "string",
+  "category": "string | null",
   "tags": ["string"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
@@ -467,7 +467,7 @@ model Recipe {
   slug            String                // unique per author (not globally); see @@unique below
   title           String
   description     String?
-  category        String
+  category        String?
   coverImageUrl   String?
   imageUrls       String[]
   prepTimeMinutes Int?
@@ -493,7 +493,7 @@ model RecipeIngredient {
   id       String  @id @default(uuid())
   recipeId String
   name     String
-  quantity String
+  quantity Float?
   unit     String?
   notes    String?
   order    Int     @default(0)
@@ -549,7 +549,8 @@ model RecipeTag {
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
 - `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery.
 - `RecipeIngredient.name` is a plain string (no normalized `Ingredient` table). Phase 2 scope.
-- `Recipe.category` is a plain string in Phase 1. A `Category` model can be added in Phase 2.
+- `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
+- `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2.
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
 
 ---

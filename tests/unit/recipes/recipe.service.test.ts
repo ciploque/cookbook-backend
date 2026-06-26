@@ -77,7 +77,7 @@ const mockRecipeFull = {
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
   author: { id: 'author-uuid', username: 'joao', displayName: 'João', avatarUrl: null },
-  ingredients: [{ id: 'ing-1', recipeId: 'recipe-uuid', name: 'Spaghetti', quantity: '400g', unit: null, notes: null, order: 0 }],
+  ingredients: [{ id: 'ing-1', recipeId: 'recipe-uuid', name: 'Spaghetti', quantity: 400, unit: null, notes: null, order: 0 }],
   steps: [{ id: 'step-1', recipeId: 'recipe-uuid', order: 1, instruction: 'Boil pasta', imageUrl: null }],
   recipeTags: [{ tag: { id: 'tag-1', name: 'italian', slug: 'italian' } }],
 };
@@ -175,7 +175,7 @@ describe('createRecipe()', () => {
 
     await expect(
       createRecipe('kc-unknown', {
-        title: 'Test', description: 'desc', category: 'cat',
+        title: 'Test', description: 'desc',
         tags: [], ingredients: [], steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
@@ -193,7 +193,7 @@ describe('createRecipe()', () => {
       description: 'Classic Roman pasta dish',
       category: 'pasta',
       tags: ['italian'],
-      ingredients: [{ name: 'Spaghetti', quantity: '400g' }],
+      ingredients: [{ name: 'Spaghetti', quantity: 400 }],
       steps: [{ order: 1, instruction: 'Boil pasta' }],
     });
 
@@ -228,8 +228,8 @@ describe('createRecipe()', () => {
       category: 'cat',
       tags: [],
       ingredients: [
-        { name: 'Flour', quantity: '200g' },
-        { name: 'Eggs', quantity: '2' },
+        { name: 'Flour', quantity: 200 },
+        { name: 'Eggs', quantity: 2 },
       ],
       steps: [],
     });
