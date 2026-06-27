@@ -17,7 +17,10 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  recipes Recipe[]
+  recipes             Recipe[]
+  reviews             Review[]
+  collections         Collection[]
+  followedCollections CollectionFollower[]
 
   @@map("users")
 }
@@ -41,6 +44,8 @@ model Recipe {
   ingredients RecipeIngredient[]
   steps       RecipeStep[]
   recipeTags  RecipeTag[]
+  reviews     Review[]
+  collections CollectionRecipe[]
 
   @@unique([authorId, slug])
   @@index([authorId])
@@ -96,4 +101,65 @@ model RecipeTag {
 
   @@id([recipeId, tagId])
   @@map("recipe_tags")
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  recipeId  String
+  authorId  String
+  rating    Int
+  content   String?
+  imageUrls String[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, authorId])
+  @@index([recipeId])
+  @@index([authorId])
+  @@map("reviews")
+}
+
+model Collection {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  description String?
+  isPublic    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner     User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  recipes   CollectionRecipe[]
+  followers CollectionFollower[]
+
+  @@index([ownerId])
+  @@map("collections")
+}
+
+model CollectionRecipe {
+  collectionId String
+  recipeId     String
+  order        Int
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  recipe     Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, recipeId])
+  @@index([collectionId])
+  @@map("collection_recipes")
+}
+
+model CollectionFollower {
+  collectionId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, userId])
+  @@map("collection_followers")
 }

@@ -7,13 +7,19 @@ import { env, allowedOrigins } from './config/env';
 import { buildOpenApiDocument } from './docs/openapi';
 import { validate } from './middlewares/validate';
 import { recipeQuerySchema } from './modules/recipes/recipe.schema';
+import { reviewQuerySchema } from './modules/reviews/review.schema';
+import { collectionQuerySchema } from './modules/collections/collection.schema';
 import { prisma } from './config/database';
 import { requestLogger } from './middlewares/requestLogger';
 import { errorHandler } from './middlewares/errorHandler';
 import userRouter from './modules/users/user.router';
 import recipeRouter from './modules/recipes/recipe.router';
+import reviewRouter from './modules/reviews/review.router';
+import collectionRouter from './modules/collections/collection.router';
 import { asyncHandler } from './utils/asyncHandler';
 import { listRecipesByUser, getRecipeByUsernameAndSlug } from './modules/recipes/recipe.controller';
+import { listReviewsByRecipe } from './modules/reviews/review.controller';
+import { listCollectionsByUser } from './modules/collections/collection.controller';
 
 export function createApp(): express.Application {
   const app = express();
@@ -41,9 +47,13 @@ export function createApp(): express.Application {
   const base = env.API_BASE_PATH;
   app.use(`${base}/v1/users`, writeLimiter, userRouter);
   app.use(`${base}/v1/recipes`, recipeRouter);
+  app.use(`${base}/v1/reviews`, writeLimiter, reviewRouter);
+  app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
 
+  app.get(`${base}/v1/recipes/:recipeId/reviews`, validate(reviewQuerySchema, 'query'), asyncHandler(listReviewsByRecipe));
   app.get(`${base}/v1/users/:username/recipes/:recipename`, asyncHandler(getRecipeByUsernameAndSlug));
   app.get(`${base}/v1/users/:userId/recipes`, validate(recipeQuerySchema, 'query'), asyncHandler(listRecipesByUser));
+  app.get(`${base}/v1/users/:userId/collections`, validate(collectionQuerySchema, 'query'), asyncHandler(listCollectionsByUser));
 
   if (env.NODE_ENV !== 'production') {
     const removeCSP = (_req: express.Request, res: express.Response, next: express.NextFunction) => {

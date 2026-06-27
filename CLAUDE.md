@@ -65,6 +65,16 @@ cookbook-backend/
 │   │   │   ├── recipe.service.ts
 │   │   │   ├── recipe.schema.ts
 │   │   │   └── recipe.search.ts   # Meilisearch sync (indexRecipe/update/delete) + searchRecipesViaMeili
+│   │   ├── reviews/
+│   │   │   ├── review.router.ts
+│   │   │   ├── review.controller.ts
+│   │   │   ├── review.service.ts
+│   │   │   └── review.schema.ts       # Zod schemas; rating: 1–5 int; imageUrls: optional array
+│   │   ├── collections/
+│   │   │   ├── collection.router.ts
+│   │   │   ├── collection.controller.ts
+│   │   │   ├── collection.service.ts
+│   │   │   └── collection.schema.ts   # metadata schemas (no recipes); addRecipesSchema; removeRecipesSchema
 │   │   ├── ingredients/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
 │   │   └── tags/
@@ -93,6 +103,10 @@ cookbook-backend/
 │   │   │   └── user.service.test.ts
 │   │   ├── recipes/
 │   │   │   └── recipe.service.test.ts
+│   │   ├── reviews/
+│   │   │   └── review.service.test.ts
+│   │   ├── collections/
+│   │   │   └── collection.service.test.ts
 │   │   └── middlewares/
 │   │       └── authenticate.test.ts
 │   ├── integration/            # Pending — use real DB + supertest
@@ -419,6 +433,117 @@ The frontend uploads images directly to an object storage bucket (S3 or Cloudfla
 
 ---
 
+### Reviews
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/recipes/:recipeId/reviews` | Public | Paginated reviews for a recipe |
+| POST | `/reviews` | Required | Create a review |
+
+#### GET /recipes/:recipeId/reviews — Query Parameters
+
+| Param | Type | Description |
+|---|---|---|
+| `page` | number | Default `1` |
+| `limit` | number | Default `20`, max `50` |
+
+#### POST /reviews — Request Body
+
+```json
+{
+  "recipeId": "uuid (required)",
+  "rating": "number (required, integer 1–5)",
+  "content": "string (optional, max 2000)",
+  "imageUrls": ["string (optional, https urls)"]
+}
+```
+
+**Errors:** `404 RECIPE_NOT_FOUND` if recipe does not exist. `409 CONFLICT` if the authenticated user has already reviewed this recipe. One review per user per recipe is enforced by a DB unique constraint.
+
+#### Review Object Shape
+
+```json
+{
+  "id": "uuid",
+  "recipeId": "uuid",
+  "rating": 4,
+  "content": "string | null",
+  "imageUrls": ["string"],
+  "author": { "id": "uuid", "username": "string", "displayName": "string", "avatarUrl": "string | null" },
+  "createdAt": "ISO8601",
+  "updatedAt": "ISO8601"
+}
+```
+
+**Note:** Reviews are intentionally excluded from all recipe GET responses (`getRecipeById`, `listRecipes`, `getRecipeByUsernameAndSlug`).
+
+---
+
+### Collections
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/users/:userId/collections` | Public* | List user's collections (private filtered unless owner) |
+| GET | `/collections/:collectionId` | Public* | Get single collection with ordered recipes |
+| POST | `/collections` | Required | Create collection (metadata only) |
+| PUT | `/collections/:collectionId` | Required + Owner | Full metadata update |
+| PATCH | `/collections/:collectionId` | Required + Owner | Partial metadata update |
+| DELETE | `/collections/:collectionId` | Required + Owner | Delete |
+| POST | `/collections/:collectionId/recipes` | Required + Owner | Add one or many recipes (with order) |
+| DELETE | `/collections/:collectionId/recipes` | Required + Owner | Remove one or many recipes |
+| POST | `/collections/:collectionId/follow` | Required, not owner | Follow public collection |
+| DELETE | `/collections/:collectionId/follow` | Required | Unfollow |
+
+*Private collections: 404 for single, filtered out for list, when accessed by non-owner.
+
+#### POST /collections — Request Body
+
+```json
+{
+  "name": "string (required, 1–100 chars)",
+  "description": "string (optional, max 500)",
+  "isPublic": "boolean (default false)"
+}
+```
+
+PUT uses the same body (all fields required). PATCH makes all fields optional. **Neither PUT nor PATCH accepts a `recipes` field** — recipe membership is managed via the dedicated `/recipes` sub-routes.
+
+#### POST /collections/:collectionId/recipes — Request Body
+
+```json
+{ "recipes": [{ "recipeId": "uuid", "order": 0 }] }
+```
+
+Uses `createMany({ skipDuplicates: true })` — adding a recipe already in the collection is a no-op.
+
+#### DELETE /collections/:collectionId/recipes — Request Body
+
+```json
+{ "recipeIds": ["uuid", "uuid"] }
+```
+
+#### Collection Object Shape
+
+```json
+{
+  "id": "uuid",
+  "name": "string",
+  "description": "string | null",
+  "isPublic": true,
+  "owner": { "id": "uuid", "username": "string", "displayName": "string", "avatarUrl": "string | null" },
+  "recipes": [
+    { "collectionId": "uuid", "recipeId": "uuid", "order": 0, "recipe": { "id": "uuid", "slug": "string", "title": "string", "coverImageUrl": "string | null" } }
+  ],
+  "followerCount": 5,
+  "createdAt": "ISO8601",
+  "updatedAt": "ISO8601"
+}
+```
+
+**Follow constraints:** Only public collections can be followed. Authors cannot follow their own collections. A `409 CONFLICT` is returned if already following.
+
+---
+
 ### Error Codes
 
 | Code | HTTP | Meaning |
@@ -427,8 +552,10 @@ The frontend uploads images directly to an object storage bucket (S3 or Cloudfla
 | `FORBIDDEN` | 403 | Authenticated but not the resource owner |
 | `USER_NOT_FOUND` | 404 | User record not found |
 | `RECIPE_NOT_FOUND` | 404 | Recipe record not found |
+| `REVIEW_NOT_FOUND` | 404 | Review record not found |
+| `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
 | `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation |
-| `CONFLICT` | 409 | Duplicate resource (e.g. username already taken) |
+| `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
 | `INTERNAL_ERROR` | 500 | Unhandled server error |
 
 ---
@@ -538,6 +665,68 @@ model RecipeTag {
 
   @@id([recipeId, tagId])
   @@map("recipe_tags")
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  recipeId  String
+  authorId  String
+  rating    Int                       // mandatory; Zod enforces 1–5
+  content   String?
+  imageUrls String[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, authorId])      // one review per user per recipe
+  @@index([recipeId])
+  @@index([authorId])
+  @@map("reviews")
+}
+
+model Collection {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  description String?
+  isPublic    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner     User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  recipes   CollectionRecipe[]
+  followers CollectionFollower[]
+
+  @@index([ownerId])
+  @@map("collections")
+}
+
+// Recipe membership with explicit ordering. Composite PK prevents duplicate recipe in same collection.
+model CollectionRecipe {
+  collectionId String
+  recipeId     String
+  order        Int
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  recipe     Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, recipeId])
+  @@index([collectionId])
+  @@map("collection_recipes")
+}
+
+model CollectionFollower {
+  collectionId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, userId])
+  @@map("collection_followers")
 }
 ```
 
@@ -676,7 +865,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (75 passing)
+### Unit Tests (119 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -686,7 +875,10 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/slugify.test.ts` | 12 | Diacritics, special chars, slug format, random suffix uniqueness |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
 | `tests/unit/users/user.service.test.ts` | 12 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById |
-| `tests/unit/recipes/recipe.service.test.ts` | 17 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present |
+| `tests/unit/recipes/recipe.service.test.ts` | 19 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present |
+| `tests/unit/recipes/recipe.search.test.ts` | 8 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping |
+| `tests/unit/reviews/review.service.test.ts` | 9 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate), getReviewAuthorKeycloakId (found, null) |
+| `tests/unit/collections/collection.service.test.ts` | 25 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes, followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerKeycloakId |
 | `tests/unit/middlewares/authenticate.test.ts` | 8 | Dev bypass, missing/non-Bearer header, valid token, expired token, null payload, JWKS key resolution |
 | `tests/unit/docs/openapi.test.ts` | 1 | Every Express route has a matching OpenAPI spec entry |
 

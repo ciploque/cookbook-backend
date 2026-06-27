@@ -3,6 +3,15 @@ import { OpenAPIRegistry, OpenApiGeneratorV3 } from '@asteasolutions/zod-to-open
 import { z } from 'zod';
 import { createRecipeSchema, updateRecipeSchema, patchRecipeSchema, recipeQuerySchema } from '../modules/recipes/recipe.schema';
 import { provisionUserSchema, updateUserSchema } from '../modules/users/user.schema';
+import { createReviewSchema, reviewQuerySchema } from '../modules/reviews/review.schema';
+import {
+  createCollectionSchema,
+  updateCollectionSchema,
+  patchCollectionSchema,
+  addRecipesSchema,
+  removeRecipesSchema,
+  collectionQuerySchema,
+} from '../modules/collections/collection.schema';
 
 const registry = new OpenAPIRegistry();
 
@@ -116,6 +125,27 @@ const ErrorSchema = z.object({
   }),
 });
 
+const ReviewAuthorSchema = z.object({
+  id: z.string().uuid(),
+  username: z.string(),
+  displayName: z.string(),
+  avatarUrl: z.string().nullable(),
+});
+
+const ReviewSchema = registry.register(
+  'Review',
+  z.object({
+    id: z.string().uuid(),
+    recipeId: z.string().uuid(),
+    rating: z.number().int().min(1).max(5),
+    content: z.string().nullable(),
+    imageUrls: z.array(z.string()),
+    author: ReviewAuthorSchema,
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
+
 // ── Input schemas ─────────────────────────────────────────────────────────────
 
 const CreateRecipeBody = registry.register('CreateRecipeBody', createRecipeSchema);
@@ -123,6 +153,46 @@ const UpdateRecipeBody = registry.register('UpdateRecipeBody', updateRecipeSchem
 const PatchRecipeBody = registry.register('PatchRecipeBody', patchRecipeSchema);
 const ProvisionUserBody = registry.register('ProvisionUserBody', provisionUserSchema);
 const UpdateUserBody = registry.register('UpdateUserBody', updateUserSchema);
+const CreateReviewBody = registry.register('CreateReviewBody', createReviewSchema);
+
+const CollectionRecipeItemSchema = z.object({
+  recipeId: z.string().uuid(),
+  order: z.number().int(),
+  recipe: z.object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    title: z.string(),
+    coverImageUrl: z.string().nullable(),
+  }),
+});
+
+const CollectionOwnerSchema = z.object({
+  id: z.string().uuid(),
+  username: z.string(),
+  displayName: z.string(),
+  avatarUrl: z.string().nullable(),
+});
+
+const CollectionSchema = registry.register(
+  'Collection',
+  z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    description: z.string().nullable(),
+    isPublic: z.boolean(),
+    owner: CollectionOwnerSchema,
+    recipes: z.array(CollectionRecipeItemSchema),
+    followerCount: z.number().int(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
+
+const CreateCollectionBody = registry.register('CreateCollectionBody', createCollectionSchema);
+const UpdateCollectionBody = registry.register('UpdateCollectionBody', updateCollectionSchema);
+const PatchCollectionBody = registry.register('PatchCollectionBody', patchCollectionSchema);
+const AddRecipesBody = registry.register('AddRecipesBody', addRecipesSchema);
+const RemoveRecipesBody = registry.register('RemoveRecipesBody', removeRecipesSchema);
 
 // ── Security scheme ───────────────────────────────────────────────────────────
 
@@ -395,6 +465,264 @@ registry.registerPath({
       content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
     },
     404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+// ── Reviews ───────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/recipes/{recipeId}/reviews',
+  tags: ['Reviews'],
+  summary: 'List reviews for a recipe',
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+    query: reviewQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Paginated list of reviews',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            data: z.array(ReviewSchema),
+            meta: PaginationMetaSchema,
+          }),
+        },
+      },
+    },
+    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Invalid query params', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/reviews',
+  tags: ['Reviews'],
+  summary: 'Create a review',
+  security: [{ bearerAuth: [] }],
+  request: {
+    body: { content: { 'application/json': { schema: CreateReviewBody } } },
+  },
+  responses: {
+    201: {
+      description: 'Review created',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Recipe or user not found', content: { 'application/json': { schema: ErrorSchema } } },
+    409: { description: 'Already reviewed this recipe', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/users/{userId}/collections',
+  tags: ['Collections'],
+  summary: 'List collections by user',
+  request: {
+    params: z.object({ userId: z.string().uuid() }),
+    query: collectionQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Paginated list of collections',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            data: z.array(CollectionSchema),
+            meta: PaginationMetaSchema,
+          }),
+        },
+      },
+    },
+    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/collections/{collectionId}',
+  tags: ['Collections'],
+  summary: 'Get collection by ID',
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Collection detail',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    404: { description: 'Collection not found or private', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/collections',
+  tags: ['Collections'],
+  summary: 'Create collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    body: { content: { 'application/json': { schema: CreateCollectionBody } } },
+  },
+  responses: {
+    201: {
+      description: 'Collection created',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'put',
+  path: '/api/v1/collections/{collectionId}',
+  tags: ['Collections'],
+  summary: 'Full metadata update',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: UpdateCollectionBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Updated collection',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'patch',
+  path: '/api/v1/collections/{collectionId}',
+  tags: ['Collections'],
+  summary: 'Partial metadata update',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: PatchCollectionBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Updated collection',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/collections/{collectionId}',
+  tags: ['Collections'],
+  summary: 'Delete collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+  },
+  responses: {
+    204: { description: 'Collection deleted' },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/collections/{collectionId}/recipes',
+  tags: ['Collections'],
+  summary: 'Add recipes to collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: AddRecipesBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Collection with updated recipe list',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/collections/{collectionId}/recipes',
+  tags: ['Collections'],
+  summary: 'Remove recipes from collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: RemoveRecipesBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Collection with updated recipe list',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/collections/{collectionId}/follow',
+  tags: ['Collections'],
+  summary: 'Follow a public collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Followed successfully',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Collection is private or own collection', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    409: { description: 'Already following', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/collections/{collectionId}/follow',
+  tags: ['Collections'],
+  summary: 'Unfollow a collection',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Unfollowed successfully',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
   },
 });
 
