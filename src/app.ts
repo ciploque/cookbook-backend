@@ -3,29 +3,32 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
+import { clerkMiddleware } from '@clerk/express';
 import { env, allowedOrigins } from './config/env';
 import { buildOpenApiDocument } from './docs/openapi';
-import { validate } from './middlewares/validate';
-import { recipeQuerySchema } from './modules/recipes/recipe.schema';
-import { reviewQuerySchema } from './modules/reviews/review.schema';
-import { collectionQuerySchema } from './modules/collections/collection.schema';
 import { prisma } from './config/database';
 import { requestLogger } from './middlewares/requestLogger';
 import { errorHandler } from './middlewares/errorHandler';
 import userRouter from './modules/users/user.router';
-import recipeRouter from './modules/recipes/recipe.router';
-import reviewRouter from './modules/reviews/review.router';
-import collectionRouter from './modules/collections/collection.router';
+import recipeRouter, { userRecipesRouter } from './modules/recipes/recipe.router';
+import reviewRouter, { recipeReviewsRouter } from './modules/reviews/review.router';
+import collectionRouter, { userCollectionsRouter } from './modules/collections/collection.router';
 import { asyncHandler } from './utils/asyncHandler';
-import { listRecipesByUser, getRecipeByUsernameAndSlug } from './modules/recipes/recipe.controller';
-import { listReviewsByRecipe } from './modules/reviews/review.controller';
-import { listCollectionsByUser } from './modules/collections/collection.controller';
 
 export function createApp(): express.Application {
   const app = express();
 
   app.use(helmet());
   app.use(cors({ origin: allowedOrigins, credentials: true }));
+
+  // clerkMiddleware throws on a structurally malformed token (e.g. a non-JWT Bearer value).
+  // Swallow that error so the request continues unauthenticated: `authenticate` then returns a
+  // clean 401 on protected routes instead of a 500, and public routes keep working.
+  const clerk = clerkMiddleware();
+  app.use((req, res, next) => {
+    clerk(req, res, () => next()); // ignore token-parse errors; continue unauthenticated
+  });
+
   app.use(express.json());
   app.use(requestLogger);
 
@@ -46,14 +49,12 @@ export function createApp(): express.Application {
 
   const base = env.API_BASE_PATH;
   app.use(`${base}/v1/users`, writeLimiter, userRouter);
+  app.use(`${base}/v1/users`, userRecipesRouter); // GET reads, no write limiter
+  app.use(`${base}/v1/users`, userCollectionsRouter);
   app.use(`${base}/v1/recipes`, recipeRouter);
+  app.use(`${base}/v1/recipes`, recipeReviewsRouter);
   app.use(`${base}/v1/reviews`, writeLimiter, reviewRouter);
   app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
-
-  app.get(`${base}/v1/recipes/:recipeId/reviews`, validate(reviewQuerySchema, 'query'), asyncHandler(listReviewsByRecipe));
-  app.get(`${base}/v1/users/:username/recipes/:recipename`, asyncHandler(getRecipeByUsernameAndSlug));
-  app.get(`${base}/v1/users/:userId/recipes`, validate(recipeQuerySchema, 'query'), asyncHandler(listRecipesByUser));
-  app.get(`${base}/v1/users/:userId/collections`, validate(collectionQuerySchema, 'query'), asyncHandler(listCollectionsByUser));
 
   if (env.NODE_ENV !== 'production') {
     const removeCSP = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -63,7 +64,7 @@ export function createApp(): express.Application {
 
     // Spec is served dynamically so the `servers` URL matches whatever host the docs are opened from
     // (localhost, a LAN IP, a tunnel URL, etc.) — Swagger UI "Try it out" calls stay same-origin.
-    app.get('/api-docs.json', cors(), removeCSP, (req: express.Request, res: express.Response) => {
+    app.get('/api-docs.json', cors(), removeCSP, (_req: express.Request, res: express.Response) => {
       res.json(buildOpenApiDocument());
     });
 

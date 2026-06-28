@@ -1,23 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { jwksClient } from '../config/keycloak';
-import { env, keycloakIssuer } from '../config/env';
+import { getAuth } from '@clerk/express';
+import { env } from '../config/env';
 import { ApiError } from '../utils/ApiError';
-import { KeycloakTokenPayload } from '../types/express';
-
-function getKey(header: jwt.JwtHeader, callback: jwt.SigningKeyCallback): void {
-  if (!header.kid) {
-    callback(new Error('No kid in token header'));
-    return;
-  }
-  jwksClient.getSigningKey(header.kid, (err, key) => {
-    if (err || !key) {
-      callback(err ?? new Error('Signing key not found'));
-      return;
-    }
-    callback(null, key.getPublicKey());
-  });
-}
 
 export function authenticate(req: Request, _res: Response, next: NextFunction): void {
   if (env.NODE_ENV === 'development') {
@@ -29,29 +13,20 @@ export function authenticate(req: Request, _res: Response, next: NextFunction): 
     }
   }
 
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
-    next(ApiError.unauthorized('Missing or malformed Authorization header'));
+  let userId: string | null = null;
+  try {
+    userId = getAuth(req).userId;
+  } catch {
+    // getAuth throws on a structurally malformed token — treat as unauthenticated, not a 500.
+    next(ApiError.unauthorized('Invalid or malformed token'));
     return;
   }
 
-  const token = authHeader.slice(7);
-
-  const options: jwt.VerifyOptions = {
-    issuer: keycloakIssuer,
-    algorithms: ['RS256'],
-  };
-
-  if (env.KEYCLOAK_AUDIENCE) {
-    options.audience = env.KEYCLOAK_AUDIENCE;
+  if (!userId) {
+    next(ApiError.unauthorized('Missing or invalid authentication'));
+    return;
   }
 
-  jwt.verify(token, getKey, options, (err, decoded) => {
-    if (err || !decoded) {
-      next(ApiError.unauthorized('Invalid or expired token'));
-      return;
-    }
-    req.user = decoded as KeycloakTokenPayload;
-    next();
-  });
+  req.user = { sub: userId };
+  next();
 }

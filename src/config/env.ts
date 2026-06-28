@@ -7,9 +7,8 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().url(),
 
-  KEYCLOAK_URL: z.string().url(),
-  KEYCLOAK_REALM: z.string().min(1),
-  KEYCLOAK_AUDIENCE: z.string().optional(),
+  CLERK_SECRET_KEY: z.string().min(1),
+  CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
 
   ALLOWED_ORIGINS: z.string().min(1),
 
@@ -36,6 +35,3 @@ export const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()
 export const trustedImageDomains = env.TRUSTED_IMAGE_DOMAINS
   ? env.TRUSTED_IMAGE_DOMAINS.split(',').map((s) => s.trim())
   : [];
-
-export const keycloakJwksUri = `${env.KEYCLOAK_URL}/realms/${env.KEYCLOAK_REALM}/protocol/openid-connect/certs`;
-export const keycloakIssuer = `${env.KEYCLOAK_URL}/realms/${env.KEYCLOAK_REALM}`;

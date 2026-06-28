@@ -21,14 +21,14 @@ import { prisma } from '../../../src/config/database';
 import {
   listReviewsByRecipe,
   createReview,
-  getReviewAuthorKeycloakId,
+  getReviewAuthorId,
 } from '../../../src/modules/reviews/review.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const mockAuthor = {
   id: 'author-uuid',
-  keycloakId: 'kc-author',
+  authProviderId: 'user_author',
   username: 'joao',
   displayName: 'João',
   avatarUrl: null,
@@ -95,7 +95,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
     vi.mocked(prisma.review.create).mockResolvedValue(mockReview as never);
 
-    const result = await createReview('kc-author', {
+    const result = await createReview('user_author', {
       recipeId: 'recipe-uuid',
       rating: 4,
       content: 'Great recipe!',
@@ -118,7 +118,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
     await expect(
-      createReview('kc-unknown', { recipeId: 'recipe-uuid', rating: 3, imageUrls: [] }),
+      createReview('user_unknown', { recipeId: 'recipe-uuid', rating: 3, imageUrls: [] }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
 
     expect(prisma.recipe.findUnique).not.toHaveBeenCalled();
@@ -130,7 +130,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(null);
 
     await expect(
-      createReview('kc-author', { recipeId: 'missing-id', rating: 3, imageUrls: [] }),
+      createReview('user_author', { recipeId: 'missing-id', rating: 3, imageUrls: [] }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'RECIPE_NOT_FOUND' });
 
     expect(prisma.review.create).not.toHaveBeenCalled();
@@ -148,27 +148,27 @@ describe('createReview()', () => {
     vi.mocked(prisma.review.create).mockRejectedValue(p2002);
 
     await expect(
-      createReview('kc-author', { recipeId: 'recipe-uuid', rating: 5, imageUrls: [] }),
+      createReview('user_author', { recipeId: 'recipe-uuid', rating: 5, imageUrls: [] }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 });
 
-// ─── getReviewAuthorKeycloakId ────────────────────────────────────────────────
+// ─── getReviewAuthorId ────────────────────────────────────────────────────────
 
-describe('getReviewAuthorKeycloakId()', () => {
-  it('returns the keycloakId of the review author', async () => {
+describe('getReviewAuthorId()', () => {
+  it('returns the authProviderId of the review author', async () => {
     vi.mocked(prisma.review.findUnique).mockResolvedValue({
-      author: { keycloakId: 'kc-author' },
+      author: { authProviderId: 'user_author' },
     } as never);
 
-    const result = await getReviewAuthorKeycloakId('review-uuid');
-    expect(result).toBe('kc-author');
+    const result = await getReviewAuthorId('review-uuid');
+    expect(result).toBe('user_author');
   });
 
   it('returns null when review does not exist', async () => {
     vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
 
-    const result = await getReviewAuthorKeycloakId('missing-id');
+    const result = await getReviewAuthorId('missing-id');
     expect(result).toBeNull();
   });
 });

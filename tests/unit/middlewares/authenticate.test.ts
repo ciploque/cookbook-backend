@@ -2,20 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Request, Response, NextFunction } from 'express';
 
 vi.mock('../../../src/config/env', () => ({
-  env: { NODE_ENV: 'development', KEYCLOAK_AUDIENCE: undefined },
-  keycloakIssuer: 'http://localhost:8080/realms/cookbook',
+  env: { NODE_ENV: 'development' },
 }));
 
-vi.mock('../../../src/config/keycloak', () => ({
-  jwksClient: { getSigningKey: vi.fn() },
+vi.mock('@clerk/express', () => ({
+  getAuth: vi.fn(),
 }));
 
-vi.mock('jsonwebtoken', () => ({
-  default: { verify: vi.fn() },
-}));
-
-import jwt from 'jsonwebtoken';
-import { jwksClient } from '../../../src/config/keycloak';
+import { getAuth } from '@clerk/express';
 import { authenticate } from '../../../src/middlewares/authenticate';
 
 function makeReq(overrides: Partial<Request> = {}): Request {
@@ -41,41 +35,12 @@ describe('dev bypass (NODE_ENV=development)', () => {
 
     expect(req.user).toEqual({ sub: 'user-123' });
     expect(next).toHaveBeenCalledWith();
-    expect(jwt.verify).not.toHaveBeenCalled();
+    expect(getAuth).not.toHaveBeenCalled();
   });
 
-  it('falls through to JWT path when x-dev-user-sub header is absent', () => {
+  it('falls through to Clerk auth check when x-dev-user-sub header is absent', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: null } as never);
     const req = makeReq({ headers: {} });
-    const next = vi.fn() as unknown as NextFunction;
-
-    authenticate(req, res, next);
-
-    expect(next).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 401 }),
-    );
-  });
-});
-
-// ─── Authorization header validation ─────────────────────────────────────────
-
-describe('Authorization header validation', () => {
-  it('calls next with 401 when Authorization header is missing', () => {
-    const req = makeReq({ headers: {} });
-    const next = vi.fn() as unknown as NextFunction;
-
-    // Temporarily set non-dev env for this test
-    vi.doMock('../../../src/config/env', () => ({
-      env: { NODE_ENV: 'production', KEYCLOAK_AUDIENCE: undefined },
-      keycloakIssuer: 'http://localhost:8080/realms/cookbook',
-    }));
-
-    authenticate(req, res, next);
-
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
-  });
-
-  it('calls next with 401 when Authorization header is not Bearer', () => {
-    const req = makeReq({ headers: { authorization: 'Basic abc123' } });
     const next = vi.fn() as unknown as NextFunction;
 
     authenticate(req, res, next);
@@ -84,31 +49,24 @@ describe('Authorization header validation', () => {
   });
 });
 
-// ─── JWT verification ─────────────────────────────────────────────────────────
+// ─── Clerk authentication ─────────────────────────────────────────────────────
 
-describe('JWT verification', () => {
-  it('sets req.user and calls next() on a valid token', () => {
+describe('Clerk authentication', () => {
+  it('sets req.user.sub to Clerk userId and calls next() on valid session', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: 'user_abc123' } as never);
     const req = makeReq({ headers: { authorization: 'Bearer valid.token.here' } });
     const next = vi.fn() as unknown as NextFunction;
-    const decoded = { sub: 'user-uuid', email: 'user@example.com' };
-
-    vi.mocked(jwt.verify).mockImplementation((_token, _getKey, _opts, callback) => {
-      (callback as Function)(null, decoded);
-    });
 
     authenticate(req, res, next);
 
-    expect(req.user).toEqual(decoded);
+    expect(req.user).toEqual({ sub: 'user_abc123' });
     expect(next).toHaveBeenCalledWith();
   });
 
-  it('calls next with 401 when jwt.verify returns an error', () => {
+  it('calls next with 401 when Clerk userId is null (unauthenticated)', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: null } as never);
     const req = makeReq({ headers: { authorization: 'Bearer expired.token' } });
     const next = vi.fn() as unknown as NextFunction;
-
-    vi.mocked(jwt.verify).mockImplementation((_token, _getKey, _opts, callback) => {
-      (callback as Function)(new Error('TokenExpiredError'), null);
-    });
 
     authenticate(req, res, next);
 
@@ -116,40 +74,36 @@ describe('JWT verification', () => {
     expect(req.user).toBeUndefined();
   });
 
-  it('calls next with 401 when decoded payload is null', () => {
-    const req = makeReq({ headers: { authorization: 'Bearer bad.payload' } });
+  it('calls next with 401 when no Authorization header is present', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: null } as never);
+    const req = makeReq({ headers: {} });
     const next = vi.fn() as unknown as NextFunction;
-
-    vi.mocked(jwt.verify).mockImplementation((_token, _getKey, _opts, callback) => {
-      (callback as Function)(null, null);
-    });
 
     authenticate(req, res, next);
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
   });
 
-  it('uses jwksClient to resolve the signing key', () => {
-    const req = makeReq({ headers: { authorization: 'Bearer some.token' } });
+  it('calls next with 401 when Authorization header is not Bearer', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: null } as never);
+    const req = makeReq({ headers: { authorization: 'Basic abc123' } });
     const next = vi.fn() as unknown as NextFunction;
-    const mockKey = { getPublicKey: () => 'public-key' };
-
-    // Simulate getSigningKey calling its callback with a key
-    vi.mocked(jwksClient.getSigningKey).mockImplementation((_kid, callback) => {
-      (callback as Function)(null, mockKey);
-    });
-
-    vi.mocked(jwt.verify).mockImplementation((_token, getKey, _opts, callback) => {
-      // Call getKey with a fake header to verify jwksClient is used
-      (getKey as Function)({ kid: 'key-id-123' }, (err: unknown, key: unknown) => {
-        expect(err).toBeNull();
-        expect(key).toBe('public-key');
-      });
-      (callback as Function)(null, { sub: 'user-1' });
-    });
 
     authenticate(req, res, next);
 
-    expect(jwksClient.getSigningKey).toHaveBeenCalledWith('key-id-123', expect.any(Function));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
+  });
+
+  it('calls next with 401 (not 500) when getAuth throws on a malformed token', () => {
+    vi.mocked(getAuth).mockImplementation(() => {
+      throw new SyntaxError('Unexpected end of data');
+    });
+    const req = makeReq({ headers: { authorization: 'Bearer garbage.token.here' } });
+    const next = vi.fn() as unknown as NextFunction;
+
+    authenticate(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
+    expect(req.user).toBeUndefined();
   });
 });

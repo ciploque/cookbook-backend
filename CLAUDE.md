@@ -1,8 +1,8 @@
 # cookbook-backend — Agent Reference
 
-Backend REST API for a cooking recipes website. Users authenticate via Keycloak on the frontend; the backend validates their JWTs and serves recipe and user data.
+Backend REST API for a cooking recipes website. Users authenticate via Clerk on the frontend; the backend validates their JWTs and serves recipe and user data.
 
-**Stack:** TypeScript · Node.js · Express.js · PostgreSQL · Prisma ORM · Zod · Keycloak (JWKS) · Meilisearch · dotenv · pino
+**Stack:** TypeScript · Node.js · Express.js · PostgreSQL · Prisma ORM · Zod · Clerk (`@clerk/express`) · Meilisearch · dotenv · pino
 
 > **Living document:** Update this file whenever schema, endpoints, env vars, or conventions change. It is the primary reference for both humans and AI agents working on this repo.
 
@@ -44,12 +44,12 @@ cookbook-backend/
 │   ├── config/
 │   │   ├── env.ts              # Zod-validated env vars, exported as typed config object; exits on missing vars
 │   │   ├── database.ts         # Prisma client singleton
-│   │   ├── keycloak.ts         # jwks-rsa client setup; issuer/audience constants
+│   │   ├── clerk.ts            # (removed — @clerk/express reads CLERK_SECRET_KEY from env automatically)
 │   │   ├── meilisearch.ts      # MeiliSearch client singleton + RECIPES_INDEX constant
 │   │   └── meilisearchSetup.ts # Configures index attributes on server startup (idempotent)
 │   ├── middlewares/
-│   │   ├── authenticate.ts     # JWT verification via JWKS; dev bypass via x-dev-user-sub; returns 401 on failure
-│   │   ├── authorize.ts        # Ownership guard factory — verifies req.user.sub === resource owner keycloakId
+│   │   ├── authenticate.ts     # Clerk JWT verification via getAuth(); dev bypass via x-dev-user-sub; returns 401 on failure
+│   │   ├── authorize.ts        # Ownership guard factory — verifies req.user.sub === resource owner authProviderId
 │   │   ├── validate.ts         # Zod middleware factory (body / query / params)
 │   │   ├── errorHandler.ts     # Global Express error handler; maps ApiError → JSON; unknown → 500
 │   │   └── requestLogger.ts    # pino-http request logger with pino-pretty in development
@@ -166,9 +166,8 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `PORT` | no | `3000` | HTTP server port |
 | `API_BASE_PATH` | no | `/api` | Base path — the code appends `/v1` per router, so set this to `/api` not `/api/v1` |
 | `DATABASE_URL` | yes | — | PostgreSQL connection string |
-| `KEYCLOAK_URL` | yes | — | Keycloak base URL (e.g. `https://auth.example.com`) |
-| `KEYCLOAK_REALM` | yes | — | Keycloak realm name |
-| `KEYCLOAK_AUDIENCE` | no | — | Expected `aud` claim in JWT (recommended) |
+| `CLERK_SECRET_KEY` | yes | — | Clerk secret key from the Clerk dashboard → API Keys |
+| `CLERK_PUBLISHABLE_KEY` | no | — | Clerk publishable key (optional for pure backend) |
 | `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins |
 | `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in `coverImageUrl` and `imageUrls` fields |
 | `MEILISEARCH_URL` | no | `http://localhost:7700` | Meilisearch base URL |
@@ -179,22 +178,22 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 
 ## Authentication Flow
 
-1. User authenticates against Keycloak in the frontend. Keycloak issues an RS256-signed JWT.
+1. User authenticates against Clerk in the frontend. Clerk issues an RS256-signed JWT (short-lived session token).
 2. Frontend sends `Authorization: Bearer <token>` on every API request.
-3. `authenticate.ts` middleware fetches Keycloak's JWKS from `{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/certs` (cached via `jwks-rsa`).
-4. The JWT is verified with `jsonwebtoken` using the matching public key. Invalid or expired tokens → `401 UNAUTHORIZED`.
-5. The decoded payload is attached as `req.user` (typed as `KeycloakTokenPayload` in `express.d.ts`). Key claims: `sub`, `email`, `preferred_username`.
-6. On the first authenticated request from a new user, `user.service.ts` auto-provisions a `User` row using `keycloakId = sub`. This happens inside `POST /users/me`.
+3. `clerkMiddleware()` in `app.ts` intercepts the request and populates Clerk auth state (reads the bearer token or session cookie). It reads `CLERK_SECRET_KEY` from the environment automatically.
+4. `authenticate.ts` calls `getAuth(req).userId` (synchronous). If `userId` is null, returns `401 UNAUTHORIZED`.
+5. `req.user = { sub: userId }` is set and `next()` is called. All downstream code (`authorize`, controllers, services) uses `req.user.sub` unchanged.
+6. On the first authenticated request from a new user, `user.service.ts` auto-provisions a `User` row using `authProviderId = req.user.sub`. This happens inside `POST /users/me`.
 
 ### Dev Bypass (development only)
 
-When `NODE_ENV=development`, `authenticate.ts` accepts a shortcut header that skips JWKS verification entirely:
+When `NODE_ENV=development`, `authenticate.ts` accepts a shortcut header that skips Clerk verification entirely:
 
 ```
 x-dev-user-sub: <any-string>
 ```
 
-This sets `req.user = { sub: "<any-string>" }` and calls `next()`. It is **never active** in `production`. Use it to test protected endpoints locally without a running Keycloak instance.
+This sets `req.user = { sub: "<any-string>" }` and calls `next()`. It is **never active** in `production`. Use it to test protected endpoints locally without a Clerk account.
 
 ```bash
 curl -H "x-dev-user-sub: my-test-user" http://localhost:3001/api/v1/users/me
@@ -203,21 +202,31 @@ curl -H "x-dev-user-sub: my-test-user" http://localhost:3001/api/v1/users/me
 ### `req.user` Type
 
 ```typescript
-interface KeycloakTokenPayload {
-  sub: string;               // Keycloak user ID — used as the stable external key
+interface AuthTokenPayload {
+  sub: string;               // Clerk user ID — used as the stable external key (authProviderId in DB)
   email?: string;
-  preferred_username?: string;
   given_name?: string;
   family_name?: string;
 }
 ```
+
+### Testing Auth Locally
+
+Two ways to hit protected routes during development:
+
+1. **Dev bypass** — fastest; skips Clerk entirely. Send `x-dev-user-sub: <any-string>` (only works in `NODE_ENV=development`). Exercises routing/validation/DB but **not** Clerk verification.
+2. **Real token** — exercises the genuine `getAuth()` path. Mint a real Clerk session token without a frontend:
+   ```bash
+   npm run clerk:token -- <clerkUserId>   # userId from Clerk dashboard → Users (user_xxx)
+   ```
+   The script (`scripts/clerkToken.ts`) uses the secret key to `createSession` + `getToken`. Pass the printed JWT as `Authorization: Bearer <jwt>`. Default session tokens expire in ~60s — re-run to refresh, or pass a JWT template name as a 2nd arg for a longer-lived token.
 
 ---
 
 ## API Reference
 
 **Base URL:** `/api/v1`
-**Auth header:** `Authorization: Bearer <keycloak_jwt>` (on protected routes)
+**Auth header:** `Authorization: Bearer <clerk_session_token>` (on protected routes)
 
 ### Response Envelope
 
@@ -260,7 +269,7 @@ All responses use a consistent shape:
 
 #### POST /users/me
 
-Creates a `User` row using `req.user.sub` as `keycloakId`. If a row already exists for that `keycloakId`, returns it unchanged (idempotent). Call this on first login.
+Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already exists for that `authProviderId`, returns it unchanged (idempotent). Call this on first login.
 
 **Request body:**
 ```json
@@ -293,7 +302,7 @@ Creates a `User` row using `req.user.sub` as `keycloakId`. If a row already exis
 ```json
 {
   "id": "uuid",
-  "keycloakId": "string",
+  "authProviderId": "string",
   "username": "string",
   "displayName": "string",
   "bio": "string | null",
@@ -303,7 +312,7 @@ Creates a `User` row using `req.user.sub` as `keycloakId`. If a row already exis
 }
 ```
 
-**Note:** `keycloakId` is omitted from the public `GET /users/:userId` response.
+**Note:** `authProviderId` is omitted from the public `GET /users/:userId` response.
 
 ---
 
@@ -320,7 +329,7 @@ Creates a `User` row using `req.user.sub` as `keycloakId`. If a row already exis
 | GET | `/users/:userId/recipes` | Public | List recipes by a specific user (by DB id) |
 | GET | `/users/:username/recipes/:recipename` | Public | Get recipe by author username + slug (human-friendly URL) |
 
-> **Route registration order matters:** `GET /users/:username/recipes/:recipename` is registered **before** `GET /users/:userId/recipes` in `app.ts` to avoid the more-specific route being shadowed by the param wildcard.
+> **Route registration order matters:** `GET /users/:username/recipes/:recipename` is registered **before** `GET /users/:userId/recipes` in `userRecipesRouter` (in `recipe.router.ts`) to avoid the more-specific route being shadowed by the param wildcard. Cross-prefix routes live in their owning module's router and are exported as a named router (`userRecipesRouter`, `userCollectionsRouter`, `recipeReviewsRouter`); `app.ts` only mounts routers, it does not define routes.
 
 #### GET /recipes — Query Parameters
 
@@ -576,7 +585,7 @@ datasource db {
 
 model User {
   id          String   @id @default(uuid())
-  keycloakId  String   @unique           // Keycloak sub claim — stable external key
+  authProviderId  String   @unique           // Clerk userId (sub claim) — stable external key
   username    String   @unique           // URL-safe handle: ^[a-z0-9_-]+$, 3–30 chars
   displayName String
   bio         String?
@@ -932,6 +941,7 @@ Both run via `docker/docker-compose.yml`.
 | `npm run db:seed` | Seed development database |
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run meili:reindex` | Bulk-index all recipes from Postgres into Meilisearch |
+| `npm run clerk:token -- <userId>` | Mint a real Clerk session token for local API testing (no frontend needed) |
 
 ---
 
@@ -956,7 +966,7 @@ Both run via `docker/docker-compose.yml`.
 - [x] `POST /users/me` creates a User row (with `username`) if new; returns existing if already provisioned (idempotent)
 - [x] `GET /users/me` returns the authenticated user's full profile
 - [x] `PUT /users/me` updates `username`, `displayName`, `bio`, `avatarUrl`
-- [x] `GET /users/:userId` returns public profile (no `keycloakId`)
+- [x] `GET /users/:userId` returns public profile (no `authProviderId`)
 - [x] `username` field: unique, URL-safe, 3–30 chars, `^[a-z0-9_-]+$`
 - [x] Zod validation rejects invalid/missing fields with 422; duplicate username → 409 CONFLICT
 

@@ -36,14 +36,14 @@ import {
   removeRecipesFromCollection,
   followCollection,
   unfollowCollection,
-  getCollectionOwnerKeycloakId,
+  getOwnerId,
 } from '../../../src/modules/collections/collection.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const mockOwner = {
   id: 'owner-uuid',
-  keycloakId: 'kc-owner',
+  authProviderId: 'user_owner',
   username: 'joao',
   displayName: 'João',
   avatarUrl: null,
@@ -57,7 +57,7 @@ const mockCollectionFull = {
   isPublic: true,
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
-  owner: { id: 'owner-uuid', username: 'joao', displayName: 'João', avatarUrl: null, keycloakId: 'kc-owner' },
+  owner: { id: 'owner-uuid', username: 'joao', displayName: 'João', avatarUrl: null, authProviderId: 'user_owner' },
   recipes: [
     {
       collectionId: 'collection-uuid',
@@ -76,7 +76,7 @@ const mockPrivateCollection = {
   _count: { followers: 0 },
 };
 
-const mockTargetUser = { id: 'owner-uuid', keycloakId: 'kc-owner' };
+const mockTargetUser = { id: 'owner-uuid', authProviderId: 'user_owner' };
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -88,13 +88,13 @@ describe('listCollectionsByUser()', () => {
     vi.mocked(prisma.collection.count).mockResolvedValue(1);
     vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull] as never);
 
-    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'kc-other');
+    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_other');
 
     const whereArg = vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
     expect(whereArg).toMatchObject({ isPublic: true });
     expect(result.data).toHaveLength(1);
     expect(result.data[0]).toHaveProperty('followerCount', 3);
-    expect(result.data[0].owner).not.toHaveProperty('keycloakId');
+    expect(result.data[0].owner).not.toHaveProperty('authProviderId');
   });
 
   it('includes private collections when requester is the owner', async () => {
@@ -102,7 +102,7 @@ describe('listCollectionsByUser()', () => {
     vi.mocked(prisma.collection.count).mockResolvedValue(2);
     vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull, mockPrivateCollection] as never);
 
-    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'kc-owner');
+    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
 
     const whereArg = vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
     expect(whereArg).not.toHaveProperty('isPublic');
@@ -128,13 +128,13 @@ describe('getCollectionById()', () => {
     const result = await getCollectionById('collection-uuid');
 
     expect(result).toHaveProperty('id', 'collection-uuid');
-    expect(result.owner).not.toHaveProperty('keycloakId');
+    expect(result.owner).not.toHaveProperty('authProviderId');
   });
 
   it('returns a private collection to its owner', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
 
-    const result = await getCollectionById('private-uuid', 'kc-owner');
+    const result = await getCollectionById('private-uuid', 'user_owner');
 
     expect(result).toHaveProperty('id', 'private-uuid');
   });
@@ -142,7 +142,7 @@ describe('getCollectionById()', () => {
   it('throws COLLECTION_NOT_FOUND for private collection accessed by non-owner', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
 
-    await expect(getCollectionById('private-uuid', 'kc-other')).rejects.toMatchObject({
+    await expect(getCollectionById('private-uuid', 'user_other')).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });
@@ -165,7 +165,7 @@ describe('createCollection()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
     vi.mocked(prisma.collection.create).mockResolvedValue(mockCollectionFull as never);
 
-    const result = await createCollection('kc-owner', {
+    const result = await createCollection('user_owner', {
       name: 'My Favourites',
       description: 'Best recipes',
       isPublic: true,
@@ -182,7 +182,7 @@ describe('createCollection()', () => {
   it('throws USER_NOT_FOUND when user has no profile', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(createCollection('kc-unknown', { name: 'Test', isPublic: false })).rejects.toMatchObject({
+    await expect(createCollection('user_unknown', { name: 'Test', isPublic: false })).rejects.toMatchObject({
       statusCode: 404,
       code: 'USER_NOT_FOUND',
     });
@@ -273,8 +273,8 @@ describe('deleteCollection()', () => {
 describe('addRecipesToCollection()', () => {
   it('creates recipe rows with skipDuplicates and returns updated collection', async () => {
     vi.mocked(prisma.collection.findUnique)
-      .mockResolvedValueOnce(mockCollectionFull as never)  // existence check
-      .mockResolvedValueOnce(mockCollectionFull as never); // refetch after insert
+      .mockResolvedValueOnce(mockCollectionFull as never)
+      .mockResolvedValueOnce(mockCollectionFull as never);
     vi.mocked(prisma.collectionRecipe.createMany).mockResolvedValue({ count: 1 });
 
     const result = await addRecipesToCollection('collection-uuid', {
@@ -319,7 +319,7 @@ describe('followCollection()', () => {
   const mockCollectionWithOwner = {
     id: 'collection-uuid',
     isPublic: true,
-    owner: { keycloakId: 'kc-owner' },
+    owner: { authProviderId: 'user_owner' },
   };
 
   it('creates a follower row on success', async () => {
@@ -327,7 +327,7 @@ describe('followCollection()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
     vi.mocked(prisma.collectionFollower.create).mockResolvedValue({} as never);
 
-    await followCollection('collection-uuid', 'kc-other');
+    await followCollection('collection-uuid', 'user_other');
 
     expect(prisma.collectionFollower.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ collectionId: 'collection-uuid' }) }),
@@ -337,7 +337,7 @@ describe('followCollection()', () => {
   it('throws COLLECTION_NOT_FOUND when collection does not exist', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
 
-    await expect(followCollection('missing-id', 'kc-other')).rejects.toMatchObject({
+    await expect(followCollection('missing-id', 'user_other')).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });
@@ -349,7 +349,7 @@ describe('followCollection()', () => {
       isPublic: false,
     } as never);
 
-    await expect(followCollection('collection-uuid', 'kc-other')).rejects.toMatchObject({
+    await expect(followCollection('collection-uuid', 'user_other')).rejects.toMatchObject({
       statusCode: 403,
       code: 'FORBIDDEN',
     });
@@ -358,7 +358,7 @@ describe('followCollection()', () => {
   it('throws FORBIDDEN when user tries to follow their own collection', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionWithOwner as never);
 
-    await expect(followCollection('collection-uuid', 'kc-owner')).rejects.toMatchObject({
+    await expect(followCollection('collection-uuid', 'user_owner')).rejects.toMatchObject({
       statusCode: 403,
       code: 'FORBIDDEN',
     });
@@ -375,7 +375,7 @@ describe('followCollection()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
     vi.mocked(prisma.collectionFollower.create).mockRejectedValue(p2002);
 
-    await expect(followCollection('collection-uuid', 'kc-other')).rejects.toMatchObject({
+    await expect(followCollection('collection-uuid', 'user_other')).rejects.toMatchObject({
       statusCode: 409,
       code: 'CONFLICT',
     });
@@ -389,7 +389,7 @@ describe('unfollowCollection()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
     vi.mocked(prisma.collectionFollower.deleteMany).mockResolvedValue({ count: 0 });
 
-    await unfollowCollection('collection-uuid', 'kc-other');
+    await unfollowCollection('collection-uuid', 'user_other');
 
     expect(prisma.collectionFollower.deleteMany).toHaveBeenCalledWith({
       where: { collectionId: 'collection-uuid', userId: 'owner-uuid' },
@@ -397,22 +397,22 @@ describe('unfollowCollection()', () => {
   });
 });
 
-// ─── getCollectionOwnerKeycloakId ─────────────────────────────────────────────
+// ─── getOwnerId ───────────────────────────────────────────────────────────────
 
-describe('getCollectionOwnerKeycloakId()', () => {
-  it('returns the owner keycloakId', async () => {
+describe('getOwnerId()', () => {
+  it('returns the authProviderId of the collection owner', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue({
-      owner: { keycloakId: 'kc-owner' },
+      owner: { authProviderId: 'user_owner' },
     } as never);
 
-    const result = await getCollectionOwnerKeycloakId('collection-uuid');
-    expect(result).toBe('kc-owner');
+    const result = await getOwnerId('collection-uuid');
+    expect(result).toBe('user_owner');
   });
 
   it('returns null when collection does not exist', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
 
-    const result = await getCollectionOwnerKeycloakId('missing-id');
+    const result = await getOwnerId('missing-id');
     expect(result).toBeNull();
   });
 });

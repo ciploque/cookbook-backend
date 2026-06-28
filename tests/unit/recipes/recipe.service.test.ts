@@ -45,7 +45,7 @@ import { upsertTags } from '../../../src/modules/tags/tag.service';
 import {
   getRecipeById,
   getRecipeByUsernameAndSlug,
-  getRecipeAuthorKeycloakId,
+  getRecipeAuthorId,
   createRecipe,
   deleteRecipe,
   listRecipes,
@@ -56,7 +56,7 @@ import {
 
 const mockAuthor = {
   id: 'author-uuid',
-  keycloakId: 'kc-author',
+  authProviderId: 'user_author',
   username: 'joao',
   displayName: 'João',
   avatarUrl: null,
@@ -147,22 +147,22 @@ describe('getRecipeByUsernameAndSlug()', () => {
   });
 });
 
-// ─── getRecipeAuthorKeycloakId ────────────────────────────────────────────────
+// ─── getRecipeAuthorId ────────────────────────────────────────────────────────
 
-describe('getRecipeAuthorKeycloakId()', () => {
-  it('returns the keycloakId of the recipe author', async () => {
+describe('getRecipeAuthorId()', () => {
+  it('returns the authProviderId of the recipe author', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
-      author: { keycloakId: 'kc-author' },
+      author: { authProviderId: 'user_author' },
     } as never);
 
-    const result = await getRecipeAuthorKeycloakId('recipe-uuid');
-    expect(result).toBe('kc-author');
+    const result = await getRecipeAuthorId('recipe-uuid');
+    expect(result).toBe('user_author');
   });
 
   it('returns null when recipe does not exist', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(null);
 
-    const result = await getRecipeAuthorKeycloakId('missing-id');
+    const result = await getRecipeAuthorId('missing-id');
     expect(result).toBeNull();
   });
 });
@@ -174,8 +174,8 @@ describe('createRecipe()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
     await expect(
-      createRecipe('kc-unknown', {
-        title: 'Test', description: 'desc',
+      createRecipe('user_unknown', {
+        title: 'Test', description: 'desc', imageUrls: [],
         tags: [], ingredients: [], steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
@@ -188,10 +188,11 @@ describe('createRecipe()', () => {
     vi.mocked(upsertTags).mockResolvedValue([{ id: 'tag-1', name: 'italian', slug: 'italian' }]);
     vi.mocked(prisma.recipe.create).mockResolvedValue(mockRecipeFull as never);
 
-    const result = await createRecipe('kc-author', {
+    const result = await createRecipe('user_author', {
       title: 'Pasta Carbonara',
       description: 'Classic Roman pasta dish',
       category: 'pasta',
+      imageUrls: [],
       tags: ['italian'],
       ingredients: [{ name: 'Spaghetti', quantity: 400 }],
       steps: [{ order: 1, instruction: 'Boil pasta' }],
@@ -222,10 +223,11 @@ describe('createRecipe()', () => {
     vi.mocked(upsertTags).mockResolvedValue([]);
     vi.mocked(prisma.recipe.create).mockResolvedValue({ ...mockRecipeFull, recipeTags: [] } as never);
 
-    await createRecipe('kc-author', {
+    await createRecipe('user_author', {
       title: 'Test',
       description: 'desc',
       category: 'cat',
+      imageUrls: [],
       tags: [],
       ingredients: [
         { name: 'Flour', quantity: 200 },
@@ -235,8 +237,9 @@ describe('createRecipe()', () => {
     });
 
     const createCall = vi.mocked(prisma.recipe.create).mock.calls[0][0];
-    expect(createCall.data.ingredients.create[0]).toMatchObject({ name: 'Flour', order: 0 });
-    expect(createCall.data.ingredients.create[1]).toMatchObject({ name: 'Eggs', order: 1 });
+    const created = createCall.data.ingredients?.create as { name: string; order: number }[];
+    expect(created[0]).toMatchObject({ name: 'Flour', order: 0 });
+    expect(created[1]).toMatchObject({ name: 'Eggs', order: 1 });
   });
 });
 

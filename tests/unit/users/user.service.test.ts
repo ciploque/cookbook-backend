@@ -16,7 +16,7 @@ import { provisionUser, getMe, updateMe, getUserById } from '../../../src/module
 
 const mockUser = {
   id: 'user-uuid-1',
-  keycloakId: 'kc-abc',
+  authProviderId: 'user_abc',
   username: 'joao',
   displayName: 'João',
   bio: null,
@@ -35,23 +35,23 @@ beforeEach(() => vi.clearAllMocks());
 // ─── provisionUser ────────────────────────────────────────────────────────────
 
 describe('provisionUser()', () => {
-  it('creates a new user when the keycloakId does not exist', async () => {
+  it('creates a new user when the authProviderId does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.user.create).mockResolvedValue(mockUser);
 
-    const result = await provisionUser('kc-abc', { username: 'joao', displayName: 'João' });
+    const result = await provisionUser('user_abc', { username: 'joao', displayName: 'João' });
 
     expect(result.created).toBe(true);
     expect(result.user).toEqual(mockUser);
     expect(prisma.user.create).toHaveBeenCalledWith({
-      data: { keycloakId: 'kc-abc', username: 'joao', displayName: 'João', avatarUrl: undefined },
+      data: { authProviderId: 'user_abc', username: 'joao', displayName: 'João', avatarUrl: undefined },
     });
   });
 
   it('returns existing user without calling create (idempotent)', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
 
-    const result = await provisionUser('kc-abc', { username: 'joao', displayName: 'João' });
+    const result = await provisionUser('user_abc', { username: 'joao', displayName: 'João' });
 
     expect(result.created).toBe(false);
     expect(result.user).toEqual(mockUser);
@@ -62,7 +62,7 @@ describe('provisionUser()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.user.create).mockRejectedValue(p2002);
 
-    await expect(provisionUser('kc-new', { username: 'taken', displayName: 'New' }))
+    await expect(provisionUser('user_new', { username: 'taken', displayName: 'New' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 
@@ -71,7 +71,7 @@ describe('provisionUser()', () => {
     const unexpectedError = new Error('DB connection lost');
     vi.mocked(prisma.user.create).mockRejectedValue(unexpectedError);
 
-    await expect(provisionUser('kc-new', { username: 'user', displayName: 'New' }))
+    await expect(provisionUser('user_new', { username: 'user', displayName: 'New' }))
       .rejects.toThrow('DB connection lost');
   });
 });
@@ -79,19 +79,19 @@ describe('provisionUser()', () => {
 // ─── getMe ───────────────────────────────────────────────────────────────────
 
 describe('getMe()', () => {
-  it('returns the user when found by keycloakId', async () => {
+  it('returns the user when found by authProviderId', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
 
-    const result = await getMe('kc-abc');
+    const result = await getMe('user_abc');
 
     expect(result).toEqual(mockUser);
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { keycloakId: 'kc-abc' } });
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { authProviderId: 'user_abc' } });
   });
 
   it('throws USER_NOT_FOUND (404) when user does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(getMe('kc-missing')).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
+    await expect(getMe('user_missing')).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
   });
 });
 
@@ -101,7 +101,7 @@ describe('updateMe()', () => {
   it('throws USER_NOT_FOUND when user does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(updateMe('kc-missing', { displayName: 'New Name' }))
+    await expect(updateMe('user_missing', { displayName: 'New Name' }))
       .rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
 
     expect(prisma.user.update).not.toHaveBeenCalled();
@@ -112,11 +112,11 @@ describe('updateMe()', () => {
     const updated = { ...mockUser, displayName: 'New Name' };
     vi.mocked(prisma.user.update).mockResolvedValue(updated);
 
-    const result = await updateMe('kc-abc', { displayName: 'New Name' });
+    const result = await updateMe('user_abc', { displayName: 'New Name' });
 
     expect(result.displayName).toBe('New Name');
     expect(prisma.user.update).toHaveBeenCalledWith({
-      where: { keycloakId: 'kc-abc' },
+      where: { authProviderId: 'user_abc' },
       data: { displayName: 'New Name' },
     });
   });
@@ -125,7 +125,7 @@ describe('updateMe()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
     vi.mocked(prisma.user.update).mockResolvedValue({ ...mockUser, bio: 'New bio' });
 
-    await updateMe('kc-abc', { bio: 'New bio' });
+    await updateMe('user_abc', { bio: 'New bio' });
 
     const callArgs = vi.mocked(prisma.user.update).mock.calls[0][0];
     expect(callArgs.data).not.toHaveProperty('displayName');
@@ -137,7 +137,7 @@ describe('updateMe()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
     vi.mocked(prisma.user.update).mockRejectedValue(p2002);
 
-    await expect(updateMe('kc-abc', { username: 'taken' }))
+    await expect(updateMe('user_abc', { username: 'taken' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 });
@@ -145,12 +145,12 @@ describe('updateMe()', () => {
 // ─── getUserById ─────────────────────────────────────────────────────────────
 
 describe('getUserById()', () => {
-  it('returns the user without keycloakId (public field)', async () => {
+  it('returns the user without authProviderId (public field)', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
 
     const result = await getUserById('user-uuid-1');
 
-    expect(result).not.toHaveProperty('keycloakId');
+    expect(result).not.toHaveProperty('authProviderId');
     expect(result).toHaveProperty('id', 'user-uuid-1');
     expect(result).toHaveProperty('username', 'joao');
   });

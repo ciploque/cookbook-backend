@@ -45,8 +45,8 @@ export async function listReviewsByRecipe(recipeId: string, query: ReviewQuery) 
   };
 }
 
-export async function createReview(keycloakId: string, input: CreateReviewInput) {
-  const author = await prisma.user.findUnique({ where: { keycloakId } });
+export async function createReview(authProviderId: string, input: CreateReviewInput) {
+  const author = await prisma.user.findUnique({ where: { authProviderId } });
   if (!author) throw ApiError.notFound('User');
 
   const recipe = await prisma.recipe.findUnique({ where: { id: input.recipeId }, select: { id: true } });
@@ -72,10 +72,10 @@ export async function createReview(keycloakId: string, input: CreateReviewInput)
   }
 }
 
-export async function getReviewAuthorKeycloakId(reviewId: string): Promise<string | null> {
+export async function getReviewAuthorId(reviewId: string): Promise<string | null> {
   const review = await prisma.review.findUnique({
     where: { id: reviewId },
-    include: { author: { select: { keycloakId: true } } },
+    include: { author: { select: { authProviderId: true } } },
   });
-  return review?.author.keycloakId ?? null;
+  return review?.author.authProviderId ?? null;
 }

@@ -1,15 +1,14 @@
 import 'express';
 
-export interface KeycloakTokenPayload {
+export interface AuthTokenPayload {
   sub: string;
   email?: string;
-  preferred_username?: string;
   given_name?: string;
   family_name?: string;
 }
 
 declare module 'express' {
   interface Request {
-    user?: KeycloakTokenPayload;
+    user?: AuthTokenPayload;
   }
 }

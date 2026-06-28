@@ -9,14 +9,16 @@ import {
   deleteCollection,
   followCollection,
   getCollectionById,
+  listCollectionsByUser,
   patchCollection,
   removeRecipesFromCollection,
   unfollowCollection,
   updateCollection,
 } from './collection.controller';
-import { getCollectionOwnerKeycloakId } from './collection.service';
+import { getOwnerId } from './collection.service';
 import {
   addRecipesSchema,
+  collectionQuerySchema,
   createCollectionSchema,
   patchCollectionSchema,
   removeRecipesSchema,
@@ -26,7 +28,7 @@ import {
 const router = Router();
 
 const ownerGuard = authorize((req) =>
-  getCollectionOwnerKeycloakId(req.params.collectionId as string),
+  getOwnerId(req.params.collectionId as string),
 );
 
 // Public
@@ -45,5 +47,14 @@ router.delete('/:collectionId/recipes', authenticate, asyncHandler(ownerGuard), 
 // Follow / unfollow
 router.post('/:collectionId/follow', authenticate, asyncHandler(followCollection));
 router.delete('/:collectionId/follow', authenticate, asyncHandler(unfollowCollection));
+
+// Lives under the /users prefix but owned by the collections module.
+// Mounted in app.ts at `${base}/v1/users`.
+export const userCollectionsRouter = Router();
+userCollectionsRouter.get(
+  '/:userId/collections',
+  validate(collectionQuerySchema, 'query'),
+  asyncHandler(listCollectionsByUser),
+);
 
 export default router;

@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 
 export function buildUser(overrides: Partial<Parameters<PrismaClient['user']['create']>[0]['data']> = {}) {
   return {
-    keycloakId: `kc-${Math.random().toString(36).slice(2)}`,
+    authProviderId: `user_${Math.random().toString(36).slice(2)}`,
     displayName: 'Test User',
     ...overrides,
   };

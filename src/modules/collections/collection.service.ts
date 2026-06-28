@@ -11,7 +11,7 @@ import {
 } from './collection.schema';
 
 const collectionInclude = {
-  owner: { select: { id: true, username: true, displayName: true, avatarUrl: true, keycloakId: true } },
+  owner: { select: { id: true, username: true, displayName: true, avatarUrl: true, authProviderId: true } },
   recipes: {
     orderBy: { order: 'asc' as const },
     include: {
@@ -24,22 +24,22 @@ const collectionInclude = {
 function formatCollection(
   collection: Prisma.CollectionGetPayload<{ include: typeof collectionInclude }>,
 ) {
-  const { _count, owner: { keycloakId: _ownerKey, ...ownerPublic }, ...rest } = collection;
+  const { _count, owner: { authProviderId: _ownerKey, ...ownerPublic }, ...rest } = collection;
   return { ...rest, owner: ownerPublic, followerCount: _count.followers };
 }
 
 export async function listCollectionsByUser(
   userId: string,
   query: CollectionQuery,
-  requestingKeycloakId?: string,
+  requestingAuthProviderId?: string,
 ) {
   const targetUser = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, keycloakId: true },
+    select: { id: true, authProviderId: true },
   });
   if (!targetUser) throw ApiError.notFound('User');
 
-  const isOwner = !!requestingKeycloakId && requestingKeycloakId === targetUser.keycloakId;
+  const isOwner = !!requestingAuthProviderId && requestingAuthProviderId === targetUser.authProviderId;
   const { page, limit } = query;
   const skip = toSkip(page, limit);
 
@@ -65,7 +65,7 @@ export async function listCollectionsByUser(
   };
 }
 
-export async function getCollectionById(collectionId: string, requestingKeycloakId?: string) {
+export async function getCollectionById(collectionId: string, requestingAuthProviderId?: string) {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
     include: collectionInclude,
@@ -74,15 +74,15 @@ export async function getCollectionById(collectionId: string, requestingKeycloak
   if (!collection) throw ApiError.notFound('Collection');
 
   if (!collection.isPublic) {
-    const isOwner = !!requestingKeycloakId && requestingKeycloakId === collection.owner.keycloakId;
+    const isOwner = !!requestingAuthProviderId && requestingAuthProviderId === collection.owner.authProviderId;
     if (!isOwner) throw ApiError.notFound('Collection');
   }
 
   return formatCollection(collection);
 }
 
-export async function createCollection(keycloakId: string, input: CreateCollectionInput) {
-  const owner = await prisma.user.findUnique({ where: { keycloakId } });
+export async function createCollection(authProviderId: string, input: CreateCollectionInput) {
+  const owner = await prisma.user.findUnique({ where: { authProviderId } });
   if (!owner) throw ApiError.notFound('User');
 
   const collection = await prisma.collection.create({
@@ -167,19 +167,19 @@ export async function removeRecipesFromCollection(collectionId: string, recipeId
   return formatCollection(collection!);
 }
 
-export async function followCollection(collectionId: string, keycloakId: string) {
+export async function followCollection(collectionId: string, authProviderId: string) {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
-    include: { owner: { select: { keycloakId: true } } },
+    include: { owner: { select: { authProviderId: true } } },
   });
 
   if (!collection) throw ApiError.notFound('Collection');
   if (!collection.isPublic) throw ApiError.forbidden('This collection is private');
-  if (collection.owner.keycloakId === keycloakId) {
+  if (collection.owner.authProviderId === authProviderId) {
     throw ApiError.forbidden('You cannot follow your own collection');
   }
 
-  const user = await prisma.user.findUnique({ where: { keycloakId } });
+  const user = await prisma.user.findUnique({ where: { authProviderId } });
   if (!user) throw ApiError.notFound('User');
 
   try {
@@ -192,17 +192,17 @@ export async function followCollection(collectionId: string, keycloakId: string)
   }
 }
 
-export async function unfollowCollection(collectionId: string, keycloakId: string) {
-  const user = await prisma.user.findUnique({ where: { keycloakId } });
+export async function unfollowCollection(collectionId: string, authProviderId: string) {
+  const user = await prisma.user.findUnique({ where: { authProviderId } });
   if (!user) throw ApiError.notFound('User');
 
   await prisma.collectionFollower.deleteMany({ where: { collectionId, userId: user.id } });
 }
 
-export async function getCollectionOwnerKeycloakId(collectionId: string): Promise<string | null> {
+export async function getOwnerId(collectionId: string): Promise<string | null> {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
-    include: { owner: { select: { keycloakId: true } } },
+    include: { owner: { select: { authProviderId: true } } },
   });
-  return collection?.owner.keycloakId ?? null;
+  return collection?.owner.authProviderId ?? null;
 }

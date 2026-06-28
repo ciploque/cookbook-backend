@@ -18,18 +18,18 @@
     "db:generate": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "meili:reindex": "tsx prisma/reindexMeilisearch.ts"
+    "meili:reindex": "tsx prisma/reindexMeilisearch.ts",
+    "clerk:token": "tsx scripts/clerkToken.ts"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^7.3.4",
+    "@clerk/express": "^2.1.32",
     "@prisma/client": "^5.22.0",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
-    "jsonwebtoken": "^9.0.2",
-    "jwks-rsa": "^3.1.0",
     "meilisearch": "^0.37.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
@@ -39,7 +39,6 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
-    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.2",
     "@types/supertest": "^6.0.2",
     "@types/swagger-ui-express": "^4.1.8",

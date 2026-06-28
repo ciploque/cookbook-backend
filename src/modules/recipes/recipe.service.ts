@@ -126,16 +126,16 @@ export async function getRecipeById(id: string) {
   return formatRecipeFull(recipe);
 }
 
-export async function getRecipeAuthorKeycloakId(recipeId: string): Promise<string | null> {
+export async function getRecipeAuthorId(recipeId: string): Promise<string | null> {
   const recipe = await prisma.recipe.findUnique({
     where: { id: recipeId },
-    include: { author: { select: { keycloakId: true } } },
+    include: { author: { select: { authProviderId: true } } },
   });
-  return recipe?.author.keycloakId ?? null;
+  return recipe?.author.authProviderId ?? null;
 }
 
-export async function createRecipe(keycloakId: string, input: CreateRecipeInput) {
-  const author = await prisma.user.findUnique({ where: { keycloakId } });
+export async function createRecipe(authProviderId: string, input: CreateRecipeInput) {
+  const author = await prisma.user.findUnique({ where: { authProviderId } });
   if (!author) throw ApiError.notFound('User');
 
   const slug = generateRecipeSlug(input.title);
