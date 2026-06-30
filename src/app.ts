@@ -19,7 +19,16 @@ export function createApp(): express.Application {
   const app = express();
 
   app.use(helmet());
-  app.use(cors({ origin: allowedOrigins, credentials: true }));
+  const corsOptions: cors.CorsOptions = {
+    // ALLOWED_ORIGINS="*" → reflect the request origin (required when credentials: true;
+    // the string literal "*" is rejected by browsers when credentials are present).
+    origin: env.ALLOWED_ORIGINS === '*' ? true : allowedOrigins,
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-dev-user-sub'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  };
+  app.use(cors(corsOptions));
+  app.options('*', cors(corsOptions)); // respond 204 to all preflight requests
 
   // clerkMiddleware throws on a structurally malformed token (e.g. a non-JWT Bearer value).
   // Swallow that error so the request continues unauthenticated: `authenticate` then returns a
