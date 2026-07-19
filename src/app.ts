@@ -13,6 +13,7 @@ import userRouter from './modules/users/user.router';
 import recipeRouter, { userRecipesRouter } from './modules/recipes/recipe.router';
 import reviewRouter, { recipeReviewsRouter } from './modules/reviews/review.router';
 import collectionRouter, { userCollectionsRouter } from './modules/collections/collection.router';
+import webhookRouter from './modules/webhooks/clerk.webhook.router';
 import { asyncHandler } from './utils/asyncHandler';
 
 export function createApp(): express.Application {
@@ -38,6 +39,12 @@ export function createApp(): express.Application {
     clerk(req, res, () => next()); // ignore token-parse errors; continue unauthenticated
   });
 
+  const base = env.API_BASE_PATH;
+
+  // Mounted before express.json() — Clerk webhook signature verification needs the raw,
+  // unparsed request body, which the global JSON parser below would otherwise consume.
+  app.use(`${base}/v1/webhooks`, webhookRouter);
+
   app.use(express.json());
   app.use(requestLogger);
 
@@ -56,7 +63,6 @@ export function createApp(): express.Application {
     }),
   );
 
-  const base = env.API_BASE_PATH;
   app.use(`${base}/v1/users`, writeLimiter, userRouter);
   app.use(`${base}/v1/users`, userRecipesRouter); // GET reads, no write limiter
   app.use(`${base}/v1/users`, userCollectionsRouter);

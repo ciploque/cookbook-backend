@@ -51,6 +51,7 @@ cookbook-backend/
 │   │   ├── authenticate.ts     # Clerk JWT verification via getAuth(); dev bypass via x-dev-user-sub; returns 401 on failure
 │   │   ├── authorize.ts        # Ownership guard factory — verifies req.user.sub === resource owner authProviderId
 │   │   ├── validate.ts         # Zod middleware factory (body / query / params)
+│   │   ├── verifyClerkWebhook.ts # Verifies Clerk webhook signature (svix headers); sets req.clerkEvent
 │   │   ├── errorHandler.ts     # Global Express error handler; maps ApiError → JSON; unknown → 500
 │   │   └── requestLogger.ts    # pino-http request logger with pino-pretty in development
 │   ├── modules/
@@ -77,10 +78,13 @@ cookbook-backend/
 │   │   │   └── collection.schema.ts   # metadata schemas (no recipes); addRecipesSchema; removeRecipesSchema
 │   │   ├── ingredients/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
-│   │   └── tags/
-│   │       └── tag.service.ts         # upsertTags: upserts by slug, returns Tag[]
+│   │   ├── tags/
+│   │   │   └── tag.service.ts         # upsertTags: upserts by slug, returns Tag[]
+│   │   └── webhooks/
+│   │       ├── clerk.webhook.router.ts     # POST /clerk — express.raw() body, mounted before express.json()
+│   │       └── clerk.webhook.controller.ts # Dispatches on event.type; calls into users module's public service fns
 │   ├── types/
-│   │   ├── express.d.ts        # Augments Express Request with req.user (KeycloakTokenPayload)
+│   │   ├── express.d.ts        # Augments Express Request with req.user (AuthTokenPayload) and req.clerkEvent (WebhookEvent)
 │   │   └── common.ts           # ApiResponse<T>, PaginatedResponse<T>, PaginationMeta types
 │   ├── utils/
 │   │   ├── ApiError.ts         # Custom error class: statusCode, message, code, details; static factories
@@ -107,8 +111,11 @@ cookbook-backend/
 │   │   │   └── review.service.test.ts
 │   │   ├── collections/
 │   │   │   └── collection.service.test.ts
+│   │   ├── webhooks/
+│   │   │   └── clerk.webhook.controller.test.ts
 │   │   └── middlewares/
-│   │       └── authenticate.test.ts
+│   │       ├── authenticate.test.ts
+│   │       └── verifyClerkWebhook.test.ts
 │   ├── integration/            # Pending — use real DB + supertest
 │   └── helpers/
 │       ├── testDb.ts           # Import in integration tests: sets DATABASE_URL to port 5433
@@ -168,6 +175,7 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `DATABASE_URL` | yes | — | PostgreSQL connection string |
 | `CLERK_SECRET_KEY` | yes | — | Clerk secret key from the Clerk dashboard → API Keys |
 | `CLERK_PUBLISHABLE_KEY` | no | — | Clerk publishable key (optional for pure backend) |
+| `CLERK_WEBHOOK_SIGNING_SECRET` | yes | — | Clerk dashboard → Webhooks → Signing Secret (`whsec_...`); verifies `POST /webhooks/clerk` |
 | `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins |
 | `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in `coverImageUrl` and `imageUrls` fields |
 | `MEILISEARCH_URL` | no | `http://localhost:7700` | Meilisearch base URL |
@@ -220,6 +228,22 @@ Two ways to hit protected routes during development:
    npm run clerk:token -- <clerkUserId>   # userId from Clerk dashboard → Users (user_xxx)
    ```
    The script (`scripts/clerkToken.ts`) uses the secret key to `createSession` + `getToken`. Pass the printed JWT as `Authorization: Bearer <jwt>`. Default session tokens expire in ~60s — re-run to refresh, or pass a JWT template name as a 2nd arg for a longer-lived token.
+
+### Clerk Webhooks (user lifecycle sync)
+
+`POST /webhooks/clerk` receives `user.created` / `user.updated` / `user.deleted` events from Clerk (Dashboard → Webhooks → add endpoint → subscribe to the `user` events). This is **separate from JWT auth** — the route is unauthenticated in the `req.user` sense; instead `verifyClerkWebhook.ts` verifies the request came from Clerk using the `svix-id` / `svix-timestamp` / `svix-signature` headers via `@clerk/express/webhooks`' `verifyWebhook()`, checked against `CLERK_WEBHOOK_SIGNING_SECRET`.
+
+**Why a separate raw-body route:** signature verification needs the exact, unparsed request bytes. `clerk.webhook.router.ts` applies `express.raw({ type: 'application/json' })` to only this route, and is mounted in `app.ts` **before** the global `express.json()` — otherwise the JSON parser would consume the body first and verification would fail.
+
+| Event | Behavior |
+|---|---|
+| `user.created` | Auto-provisions a stub `User` row (`user.service.ts` → `provisionFromWebhook`) with a generated fallback username (Clerk's `username` field, then the email local-part, then `user-{last8ofid}`), retried with a random suffix on collision. This does **not** replace `POST /users/me` — that remains the primary path for a user-chosen username; the frontend flow (or `PUT /users/me`) can rename the stub afterwards. |
+| `user.updated` | No-op (logged only). `username` / `displayName` / `bio` are app-owned via `PUT /users/me` and intentionally may diverge from Clerk's profile fields. |
+| `user.deleted` | Deletes the `User` row (`deleteUserByAuthProviderId`) — cascades to recipes, reviews, collections, etc. per the schema's `onDelete: Cascade`. No-ops (doesn't error) if the user was never provisioned. |
+
+**Local testing** — Clerk needs a public URL to reach your machine; the `x-dev-user-sub` bypass does not apply here since signature verification requires a real Clerk-signed payload:
+- **ngrok** (or similar tunnel): `ngrok http 3001`, then register `https://<subdomain>.ngrok-free.app/api/v1/webhooks/clerk` as the endpoint URL in Dashboard → Webhooks. Copy the endpoint's signing secret into `CLERK_WEBHOOK_SIGNING_SECRET`. Use the endpoint's "Testing" tab → "Send example" to fire a payload without a real signup/delete.
+- **Svix CLI** (`npx svix-cli listen http://localhost:3001/api/v1/webhooks/clerk`) — forwards events from Clerk (which uses Svix under the hood) straight to localhost, no public tunnel needed. Paste the printed forwarding URL into the Dashboard endpoint config.
 
 ---
 
@@ -565,6 +589,7 @@ Uses `createMany({ skipDuplicates: true })` — adding a recipe already in the c
 | `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
 | `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation |
 | `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
+| `INVALID_WEBHOOK_SIGNATURE` | 400 | `POST /webhooks/clerk` signature verification failed (bad/missing svix headers or secret mismatch) |
 | `INTERNAL_ERROR` | 500 | Unhandled server error |
 
 ---
@@ -874,7 +899,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (119 passing)
+### Unit Tests (134 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -883,12 +908,14 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/ApiError.test.ts` | 11 | All static factory methods, prototype chain, code/statusCode mapping |
 | `tests/unit/utils/slugify.test.ts` | 12 | Diacritics, special chars, slug format, random suffix uniqueness |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
-| `tests/unit/users/user.service.test.ts` | 12 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById |
+| `tests/unit/users/user.service.test.ts` | 24 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
 | `tests/unit/recipes/recipe.service.test.ts` | 19 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present |
 | `tests/unit/recipes/recipe.search.test.ts` | 8 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping |
 | `tests/unit/reviews/review.service.test.ts` | 9 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate), getReviewAuthorKeycloakId (found, null) |
 | `tests/unit/collections/collection.service.test.ts` | 25 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes, followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerKeycloakId |
 | `tests/unit/middlewares/authenticate.test.ts` | 8 | Dev bypass, missing/non-Bearer header, valid token, expired token, null payload, JWKS key resolution |
+| `tests/unit/middlewares/verifyClerkWebhook.test.ts` | 2 | Attaches verified event to `req.clerkEvent` on success; 400 `INVALID_WEBHOOK_SIGNATURE` on verification failure |
+| `tests/unit/webhooks/clerk.webhook.controller.test.ts` | 6 | user.created (primary email selection, fallback to first email), user.deleted (with/without id), user.updated (no-op/logged), unhandled event types |
 | `tests/unit/docs/openapi.test.ts` | 1 | Every Express route has a matching OpenAPI spec entry |
 
 **Mock conventions for unit tests:**
@@ -897,6 +924,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 - Mock `../../../src/utils/slugify` to control slug output
 - Mock `../../../src/modules/recipes/recipe.search` in recipe service tests — prevents the Meilisearch import chain from triggering `env.ts` validation
 - Mock `../../../src/config/env` and `../../../src/config/keycloak` for middleware tests; include `MEILISEARCH_URL` and `MEILISEARCH_API_KEY` in the env mock object
+- Mock `@clerk/express/webhooks` (`verifyWebhook`) for `verifyClerkWebhook` tests, and `../../../src/modules/users/user.service` for webhook controller tests
 - Use `vi.mock(path)` — paths are relative to the test file, not the project root
 
 ### Integration Tests (pending)
@@ -1007,3 +1035,13 @@ Both run via `docker/docker-compose.yml`.
 - [x] `recipe.service.ts` — syncs index on create/update/patch/delete; routes `q` queries to Meilisearch
 - [x] `prisma/reindexMeilisearch.ts` + `npm run meili:reindex` script for bulk reindex
 - [x] All existing unit tests updated to mock `recipe.search`; 75 tests passing
+
+### Milestone 8 — Clerk Webhooks ✅
+- [x] `CLERK_WEBHOOK_SIGNING_SECRET` env var, validated by `env.ts`
+- [x] `src/middlewares/verifyClerkWebhook.ts` — verifies svix signature via `@clerk/express/webhooks`, sets `req.clerkEvent`
+- [x] `src/modules/webhooks/clerk.webhook.router.ts` — `POST /webhooks/clerk`, raw body, mounted before global `express.json()`
+- [x] `user.created` → `user.service.ts#provisionFromWebhook` auto-provisions a stub `User` row with a generated fallback username (collision-safe, idempotent on redelivery)
+- [x] `user.deleted` → `user.service.ts#deleteUserByAuthProviderId` deletes the row (cascades); no-ops if never provisioned
+- [x] `user.updated` → no-op (logged only) — app-owned profile fields are not overwritten by Clerk
+- [x] Documented in OpenAPI spec (`src/docs/openapi.ts`)
+- [x] Unit tests: signature verification middleware, controller event dispatch, service provision/delete paths (20 new tests)

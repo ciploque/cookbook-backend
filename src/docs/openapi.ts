@@ -726,6 +726,27 @@ registry.registerPath({
   },
 });
 
+// ── Webhooks ──────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/webhooks/clerk',
+  tags: ['Webhooks'],
+  summary: 'Clerk user lifecycle webhook',
+  description:
+    'Receives user.created / user.updated / user.deleted events from Clerk. Verified via Svix signature ' +
+    '(svix-id / svix-timestamp / svix-signature headers) against CLERK_WEBHOOK_SIGNING_SECRET — not a bearer token. ' +
+    'user.created auto-provisions a stub User row with a generated fallback username. user.deleted removes the ' +
+    'corresponding User row (cascades). user.updated is currently a no-op (username/displayName/bio are app-owned).',
+  responses: {
+    200: {
+      description: 'Event processed',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
+    },
+    400: { description: 'Invalid or unverifiable webhook signature', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
 // ── Generator ─────────────────────────────────────────────────────────────────
 
 export function buildOpenApiDocument(serverUrl = '/') {

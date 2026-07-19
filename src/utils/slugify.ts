@@ -11,6 +11,5 @@ export function slugify(text: string): string {
 
 export function generateRecipeSlug(title: string): string {
   const base = slugify(title);
-  const suffix = Math.random().toString(36).slice(2, 6);
-  return `${base}-${suffix}`;
+  return `${base}`;
 }

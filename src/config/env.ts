@@ -9,6 +9,7 @@ const envSchema = z.object({
 
   CLERK_SECRET_KEY: z.string().min(1),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  CLERK_WEBHOOK_SIGNING_SECRET: z.string().min(1),
 
   ALLOWED_ORIGINS: z.string().min(1),
 
