@@ -14,10 +14,17 @@ vi.mock('../../../src/config/database', () => ({
     user: {
       findUnique: vi.fn(),
     },
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
   },
 }));
 
+vi.mock('../../../src/modules/recipes/recipe.search', () => ({
+  updateIndexedRecipeRating: vi.fn(),
+}));
+
 import { prisma } from '../../../src/config/database';
+import { updateIndexedRecipeRating } from '../../../src/modules/recipes/recipe.search';
 import {
   listReviewsByRecipe,
   createReview,
@@ -93,7 +100,10 @@ describe('createReview()', () => {
   it('creates and returns the review', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
-    vi.mocked(prisma.review.create).mockResolvedValue(mockReview as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: 4, reviewCount: 1 }],
+    ] as never);
 
     const result = await createReview('user_author', {
       recipeId: 'recipe-uuid',
@@ -111,7 +121,25 @@ describe('createReview()', () => {
         }),
       }),
     );
+    expect(prisma.$queryRaw).toHaveBeenCalled();
     expect(result).toMatchObject({ id: 'review-uuid', rating: 4 });
+  });
+
+  it('recomputes and syncs recipe rating stats to Meilisearch', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: 4.5, reviewCount: 2 }],
+    ] as never);
+
+    await createReview('user_author', {
+      recipeId: 'recipe-uuid',
+      rating: 4,
+      imageUrls: [],
+    });
+
+    expect(updateIndexedRecipeRating).toHaveBeenCalledWith('recipe-uuid', 4.5, 2);
   });
 
   it('throws USER_NOT_FOUND when the authenticated user has no profile', async () => {
@@ -145,7 +173,7 @@ describe('createReview()', () => {
 
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
-    vi.mocked(prisma.review.create).mockRejectedValue(p2002);
+    vi.mocked(prisma.$transaction).mockRejectedValue(p2002);
 
     await expect(
       createReview('user_author', { recipeId: 'recipe-uuid', rating: 5, imageUrls: [] }),

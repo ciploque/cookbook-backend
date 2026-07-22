@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
+import { updateIndexedRecipeRating } from '../recipes/recipe.search';
 import { CreateReviewInput, ReviewQuery } from './review.schema';
 
 const reviewInclude = {
@@ -53,16 +54,28 @@ export async function createReview(authProviderId: string, input: CreateReviewIn
   if (!recipe) throw ApiError.notFound('Recipe');
 
   try {
-    const review = await prisma.review.create({
-      data: {
-        recipeId: input.recipeId,
-        authorId: author.id,
-        rating: input.rating,
-        content: input.content,
-        imageUrls: input.imageUrls ?? [],
-      },
-      include: reviewInclude,
-    });
+    const [review, stats] = await prisma.$transaction([
+      prisma.review.create({
+        data: {
+          recipeId: input.recipeId,
+          authorId: author.id,
+          rating: input.rating,
+          content: input.content,
+          imageUrls: input.imageUrls ?? [],
+        },
+        include: reviewInclude,
+      }),
+      prisma.$queryRaw<{ averageRating: number | null; reviewCount: number }[]>`
+        UPDATE recipes
+        SET "reviewCount" = "reviewCount" + 1,
+            "ratingSum" = "ratingSum" + ${input.rating},
+            "averageRating" = ("ratingSum" + ${input.rating})::float / ("reviewCount" + 1)
+        WHERE id = ${input.recipeId}
+        RETURNING "averageRating", "reviewCount"
+      `,
+    ]);
+
+    void updateIndexedRecipeRating(input.recipeId, stats[0].averageRating, stats[0].reviewCount);
     return formatReview(review);
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {

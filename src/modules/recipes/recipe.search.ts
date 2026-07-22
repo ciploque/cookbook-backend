@@ -15,6 +15,8 @@ export interface RecipeSearchDocument {
   authorId: string;
   author: { id: string; username: string; displayName: string };
   tags: string[];
+  averageRating: number | null;
+  reviewCount: number;
   createdAt: string;
 }
 
@@ -32,6 +34,17 @@ export async function updateIndexedRecipe(doc: RecipeSearchDocument): Promise<vo
     .catch((err: unknown) => console.error('[meilisearch] updateIndexedRecipe failed:', err));
 }
 
+export async function updateIndexedRecipeRating(
+  recipeId: string,
+  averageRating: number | null,
+  reviewCount: number,
+): Promise<void> {
+  meiliClient
+    .index(RECIPES_INDEX)
+    .updateDocuments([{ id: recipeId, averageRating, reviewCount }])
+    .catch((err: unknown) => console.error('[meilisearch] updateIndexedRecipeRating failed:', err));
+}
+
 export async function deleteIndexedRecipe(recipeId: string): Promise<void> {
   meiliClient
     .index(RECIPES_INDEX)
@@ -40,13 +53,14 @@ export async function deleteIndexedRecipe(recipeId: string): Promise<void> {
 }
 
 export async function searchRecipesViaMeili(query: RecipeQuery) {
-  const { q, tags, category, authorId, page, limit, sortBy, order } = query;
+  const { q, tags, category, authorId, minRating, page, limit, sortBy, order } = query;
 
   const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
 
   const filter: string[] = [];
   if (category) filter.push(`category = "${category}"`);
   if (authorId) filter.push(`authorId = "${authorId}"`);
+  if (minRating !== undefined) filter.push(`averageRating >= ${minRating}`);
   tagSlugs.forEach((slug) => filter.push(`tags = "${slug}"`));
 
   const result = await meiliClient.index(RECIPES_INDEX).search<RecipeSearchDocument>(q, {

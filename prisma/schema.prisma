@@ -37,6 +37,9 @@ model Recipe {
   servings        Int?
   difficulty      Int?
   authorId        String
+  reviewCount     Int      @default(0)
+  ratingSum       Int      @default(0)
+  averageRating   Float?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -50,6 +53,7 @@ model Recipe {
   @@unique([authorId, slug])
   @@index([authorId])
   @@index([category])
+  @@index([averageRating])
   @@map("recipes")
 }
 

@@ -36,9 +36,10 @@ export const recipeQuerySchema = z.object({
   tags: z.string().optional(),
   category: z.string().optional(),
   authorId: z.string().uuid().optional(),
+  minRating: z.coerce.number().min(1).max(5).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(20),
-  sortBy: z.enum(['createdAt', 'updatedAt', 'title']).default('createdAt'),
+  sortBy: z.enum(['createdAt', 'updatedAt', 'title', 'averageRating']).default('createdAt'),
   order: z.enum(['asc', 'desc']).default('desc'),
 });
 

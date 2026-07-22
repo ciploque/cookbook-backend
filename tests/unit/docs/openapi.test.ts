@@ -90,6 +90,7 @@ describe('OpenAPI documentation coverage', () => {
   it('every registered Express route has an entry in the OpenAPI spec', () => {
     const undocumented = appRoutes
       .filter(({ path }) => !path.startsWith('/api-docs')) // docs infrastructure routes
+      .filter(({ method }) => method !== 'OPTIONS') // CORS preflight handler, not a documented endpoint
       .map(({ method, path }) => ({ method, path, openApiPath: toOpenApiPath(path) }))
       .filter(({ method, openApiPath }) => !docPaths[openApiPath]?.[method.toLowerCase()])
       .map(({ method, path }) => `${method} ${path}`);

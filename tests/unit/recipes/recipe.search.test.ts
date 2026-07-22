@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSearch, mockIndex } = vi.hoisted(() => {
+const { mockSearch, mockUpdateDocuments, mockIndex } = vi.hoisted(() => {
   const mockSearch = vi.fn();
-  const mockIndex = vi.fn(() => ({ search: mockSearch }));
-  return { mockSearch, mockIndex };
+  const mockUpdateDocuments = vi.fn().mockResolvedValue(undefined);
+  const mockIndex = vi.fn(() => ({ search: mockSearch, updateDocuments: mockUpdateDocuments }));
+  return { mockSearch, mockUpdateDocuments, mockIndex };
 });
 
 vi.mock('../../../src/config/meilisearch', () => ({
@@ -11,7 +12,7 @@ vi.mock('../../../src/config/meilisearch', () => ({
   RECIPES_INDEX: 'recipes',
 }));
 
-import { searchRecipesViaMeili } from '../../../src/modules/recipes/recipe.search';
+import { searchRecipesViaMeili, updateIndexedRecipeRating } from '../../../src/modules/recipes/recipe.search';
 
 const baseHit = {
   id: 'r1',
@@ -26,6 +27,8 @@ const baseHit = {
   authorId: 'author-uuid',
   author: { id: 'author-uuid', username: 'joao', displayName: 'João' },
   tags: [],
+  averageRating: null,
+  reviewCount: 0,
   createdAt: '2024-01-01T00:00:00.000Z',
 };
 
@@ -127,5 +130,42 @@ describe('searchRecipesViaMeili() — page and limit', () => {
     });
 
     expect(result.data[0].description).toHaveLength(200);
+  });
+});
+
+// ─── searchRecipesViaMeili — filters ──────────────────────────────────────────
+
+describe('searchRecipesViaMeili() — minRating filter', () => {
+  it('adds an averageRating filter clause when minRating is provided', async () => {
+    mockSearch.mockResolvedValue({ hits: [], estimatedTotalHits: 0 });
+
+    await searchRecipesViaMeili({
+      q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', minRating: 4,
+    });
+
+    expect(mockSearch).toHaveBeenCalledWith(
+      'pasta',
+      expect.objectContaining({ filter: expect.arrayContaining(['averageRating >= 4']) }),
+    );
+  });
+
+  it('omits the averageRating filter when minRating is not provided', async () => {
+    mockSearch.mockResolvedValue({ hits: [], estimatedTotalHits: 0 });
+
+    await searchRecipesViaMeili({ q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' });
+
+    expect(mockSearch).toHaveBeenCalledWith('pasta', expect.objectContaining({ filter: undefined }));
+  });
+});
+
+// ─── updateIndexedRecipeRating ────────────────────────────────────────────────
+
+describe('updateIndexedRecipeRating()', () => {
+  it('sends a partial document update with the recomputed rating stats', async () => {
+    await updateIndexedRecipeRating('r1', 4.5, 3);
+
+    expect(mockUpdateDocuments).toHaveBeenCalledWith([
+      { id: 'r1', averageRating: 4.5, reviewCount: 3 },
+    ]);
   });
 });

@@ -41,23 +41,15 @@ describe('slugify()', () => {
 });
 
 describe('generateRecipeSlug()', () => {
-  it('starts with the slugified title', () => {
+  it('returns the slugified title', () => {
     const slug = generateRecipeSlug('Pasta Carbonara');
-    expect(slug).toMatch(/^pasta-carbonara-/);
+    expect(slug).toBe('pasta-carbonara');
   });
 
-  it('appends a 4-character random suffix', () => {
-    const slug = generateRecipeSlug('My Recipe');
-    const parts = slug.split('-');
-    const suffix = parts[parts.length - 1];
-    expect(suffix).toHaveLength(4);
-  });
-
-  it('generates different slugs on successive calls (random suffix)', () => {
+  it('produces the same slug on successive calls for the same title', () => {
     const slug1 = generateRecipeSlug('Same Title');
     const slug2 = generateRecipeSlug('Same Title');
-    // Very unlikely to collide but possible — test format instead
-    expect(slug1).toMatch(/^same-title-[a-z0-9]{4}$/);
-    expect(slug2).toMatch(/^same-title-[a-z0-9]{4}$/);
+    expect(slug1).toBe('same-title');
+    expect(slug2).toBe('same-title');
   });
 });

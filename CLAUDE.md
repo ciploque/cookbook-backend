@@ -90,7 +90,7 @@ cookbook-backend/
 │   │   ├── ApiError.ts         # Custom error class: statusCode, message, code, details; static factories
 │   │   ├── asyncHandler.ts     # Wraps async route handlers; forwards rejections to next()
 │   │   ├── pagination.ts       # parsePaginationQuery, buildMeta, toSkip
-│   │   └── slugify.ts          # slugify() + generateRecipeSlug() → "pasta-carbonara-a1b2"
+│   │   └── slugify.ts          # slugify() + generateRecipeSlug() → "pasta-carbonara"
 │   ├── app.ts                  # Express app factory (no listen call); mounts all routes
 │   └── server.ts               # Entry point: first import is dotenv/config; creates app; graceful shutdown
 ├── prisma/
@@ -363,9 +363,10 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 | `tags` | string | Comma-separated tag slugs; recipes must match ALL tags |
 | `category` | string | Filter by category string |
 | `authorId` | string (uuid) | Filter by author DB id |
+| `minRating` | number | Minimum `averageRating` (1–5); recipes with no reviews are excluded |
 | `page` | number | Default `1` |
 | `limit` | number | Default `20`, max `50` |
-| `sortBy` | string | `createdAt` \| `updatedAt` \| `title`. Default `createdAt` |
+| `sortBy` | string | `createdAt` \| `updatedAt` \| `title` \| `averageRating`. Default `createdAt` |
 | `order` | string | `asc` \| `desc`. Default `desc` |
 
 #### GET /users/:username/recipes/:recipename
@@ -373,7 +374,7 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 Returns full recipe detail for a recipe identified by the author's `username` and the recipe's `slug`. Slug uniqueness is scoped per user — two different users can have recipes with the same slug.
 
 ```
-GET /api/v1/users/joao/recipes/pasta-carbonara-a1b2
+GET /api/v1/users/joao/recipes/pasta-carbonara
 ```
 
 **Errors:** `404 RECIPE_NOT_FOUND` if either the username or slug doesn't match.
@@ -411,14 +412,14 @@ GET /api/v1/users/joao/recipes/pasta-carbonara-a1b2
 
 Ingredients are stored in the order they appear in the array (`order` is auto-assigned from array index).
 Steps must have unique `order` values per recipe.
-Slug is generated at creation from the title + a 4-char random suffix and is **immutable**.
+Slug is generated at creation from the title (no random suffix) and is **immutable**. It's unique **per author**, not globally (`@@unique([authorId, slug])`) — creating two recipes with the same title as the same author returns `409 CONFLICT`.
 
 #### Recipe Full Detail Shape
 
 ```json
 {
   "id": "uuid",
-  "slug": "pasta-carbonara-a1b2",
+  "slug": "pasta-carbonara",
   "title": "string",
   "description": "string | null",
   "category": "string | null",
@@ -428,6 +429,8 @@ Slug is generated at creation from the title + a 4-char random suffix and is **i
   "prepTimeMinutes": 15,
   "servings": 4,
   "difficulty": "number | null",
+  "averageRating": "number | null",
+  "reviewCount": 0,
   "author": { "id": "uuid", "username": "string", "displayName": "string", "avatarUrl": "string | null" },
   "ingredients": [
     { "id": "uuid", "name": "string", "quantity": "number | null", "unit": "string | null", "notes": "string | null", "order": 0 }
@@ -455,6 +458,8 @@ Abbreviated — no full steps or ingredients:
   "imageUrls": ["string"],
   "prepTimeMinutes": 15,
   "difficulty": "number | null",
+  "averageRating": "number | null",
+  "reviewCount": 0,
   "author": { "id": "uuid", "username": "string", "displayName": "string" },
   "createdAt": "ISO8601"
 }
@@ -508,7 +513,7 @@ The frontend uploads images directly to an object storage bucket (S3 or Cloudfla
 }
 ```
 
-**Note:** Reviews are intentionally excluded from all recipe GET responses (`getRecipeById`, `listRecipes`, `getRecipeByUsernameAndSlug`).
+**Note:** Individual reviews are intentionally excluded from all recipe GET responses (`getRecipeById`, `listRecipes`, `getRecipeByUsernameAndSlug`) — only the aggregate `averageRating`/`reviewCount` on the recipe itself is included; fetch `GET /recipes/:recipeId/reviews` for the full list.
 
 ---
 
@@ -635,6 +640,9 @@ model Recipe {
   servings        Int?
   difficulty      Int?                  // numeric rating — no fixed scale enforced by DB
   authorId        String
+  reviewCount     Int      @default(0) // denormalized from Review — see Schema decisions
+  ratingSum       Int      @default(0) // denormalized sum of Review.rating; averageRating = ratingSum / reviewCount
+  averageRating   Float?                // null when reviewCount = 0
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -642,10 +650,12 @@ model Recipe {
   ingredients RecipeIngredient[]
   steps       RecipeStep[]
   recipeTags  RecipeTag[]
+  reviews     Review[]
 
   @@unique([authorId, slug])            // slug is unique per author, not globally
   @@index([authorId])
   @@index([category])
+  @@index([averageRating])
   @@map("recipes")
 }
 
@@ -767,7 +777,7 @@ model CollectionFollower {
 **Schema decisions:**
 - `User.username` is a unique, URL-safe handle used in human-friendly recipe URLs (`/users/:username/recipes/:slug`).
 - `Recipe.slug` is unique **per author** (`@@unique([authorId, slug])`), not globally. Two different users can have recipes with the same slug.
-- `Recipe.slug` is generated once at creation (`{title-slug}-{4-char-suffix}`) and is **immutable**.
+- `Recipe.slug` is generated once at creation (the slugified title, no suffix) and is **immutable**.
 - `Recipe.difficulty` is a plain `Int?` — the numeric scale is defined by the frontend (e.g. 1–5 stars). No DB-level constraint beyond `min 0` enforced by Zod.
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
 - `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery.
@@ -775,6 +785,7 @@ model CollectionFollower {
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2.
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
+- `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. `POST /reviews` is currently the only write path for reviews (no update/delete route exists), so the stat update in `review.service.ts#createReview` is a simple atomic increment-and-recompute (single `UPDATE ... RETURNING`) inside the same transaction as the review insert, with no decrement/recompute-on-delete case to handle yet. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document. If a delete/update review endpoint is added later, its handler must recompute (not just decrement) `averageRating`/`ratingSum`/`reviewCount` from the `Review` table for that recipe.
 
 ---
 
@@ -906,12 +917,12 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | File | Tests | What's covered |
 |---|---|---|
 | `tests/unit/utils/ApiError.test.ts` | 11 | All static factory methods, prototype chain, code/statusCode mapping |
-| `tests/unit/utils/slugify.test.ts` | 12 | Diacritics, special chars, slug format, random suffix uniqueness |
+| `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
 | `tests/unit/users/user.service.test.ts` | 24 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 19 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present |
-| `tests/unit/recipes/recipe.search.test.ts` | 8 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping |
-| `tests/unit/reviews/review.service.test.ts` | 9 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate), getReviewAuthorKeycloakId (found, null) |
+| `tests/unit/recipes/recipe.service.test.ts` | 21 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `minRating` filter, `sortBy=averageRating` |
+| `tests/unit/recipes/recipe.search.test.ts` | 11 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping, `minRating` filter clause, `updateIndexedRecipeRating` partial document sync |
+| `tests/unit/reviews/review.service.test.ts` | 10 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorKeycloakId (found, null) |
 | `tests/unit/collections/collection.service.test.ts` | 25 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes, followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerKeycloakId |
 | `tests/unit/middlewares/authenticate.test.ts` | 8 | Dev bypass, missing/non-Bearer header, valid token, expired token, null payload, JWKS key resolution |
 | `tests/unit/middlewares/verifyClerkWebhook.test.ts` | 2 | Attaches verified event to `req.clerkEvent` on success; 400 `INVALID_WEBHOOK_SIGNATURE` on verification failure |

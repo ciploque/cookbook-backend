@@ -41,6 +41,8 @@ function toSearchDocument(
     authorId: recipe.authorId,
     author: { id: recipe.author.id, username: recipe.author.username, displayName: recipe.author.displayName },
     tags: recipe.tags,
+    averageRating: recipe.averageRating,
+    reviewCount: recipe.reviewCount,
     createdAt: recipe.createdAt.toISOString(),
   };
 }
@@ -55,6 +57,8 @@ const recipeListSelect = {
   imageUrls: true,
   prepTimeMinutes: true,
   difficulty: true,
+  averageRating: true,
+  reviewCount: true,
   createdAt: true,
   author: { select: { id: true, username: true, displayName: true } },
   recipeTags: { include: { tag: true } },
@@ -76,7 +80,7 @@ export async function listRecipes(query: RecipeQuery) {
     return searchRecipesViaMeili(query);
   }
 
-  const { tags, category, authorId, page, limit, sortBy, order } = query;
+  const { tags, category, authorId, minRating, page, limit, sortBy, order } = query;
   const skip = toSkip(page, limit);
 
   const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
@@ -84,6 +88,7 @@ export async function listRecipes(query: RecipeQuery) {
   const where: Prisma.RecipeWhereInput = {
     ...(category && { category: { equals: category, mode: 'insensitive' } }),
     ...(authorId && { authorId }),
+    ...(minRating !== undefined && { averageRating: { gte: minRating } }),
     ...(tagSlugs.length > 0 && {
       AND: tagSlugs.map((slug) => ({
         recipeTags: { some: { tag: { slug } } },

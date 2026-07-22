@@ -74,6 +74,8 @@ const mockRecipeFull = {
   servings: null,
   difficulty: null,
   authorId: 'author-uuid',
+  averageRating: null,
+  reviewCount: 0,
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
   author: { id: 'author-uuid', username: 'joao', displayName: 'João', avatarUrl: null },
@@ -351,6 +353,27 @@ describe('listRecipes()', () => {
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
     expect(whereArg).toHaveProperty('AND');
+  });
+
+  it('filters by minRating when provided', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', minRating: 4 });
+
+    const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
+    expect(whereArg).toMatchObject({ averageRating: { gte: 4 } });
+  });
+
+  it('sorts by averageRating when sortBy=averageRating', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    await listRecipes({ page: 1, limit: 20, sortBy: 'averageRating', order: 'desc' });
+
+    expect(prisma.recipe.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: { averageRating: 'desc' } }),
+    );
   });
 
   it('delegates to searchRecipesViaMeili when q is provided', async () => {
