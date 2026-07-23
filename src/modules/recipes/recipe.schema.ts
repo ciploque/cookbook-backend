@@ -21,8 +21,6 @@ export const createRecipeSchema = z.object({
   prepTimeMinutes: z.number().int().min(0).optional(),
   servings: z.number().int().min(1).optional(),
   difficulty: z.number().int().min(0).optional(),
-  coverImageUrl: z.string().url().optional(),
-  imageUrls: z.array(z.string().url()).default([]),
   ingredients: z.array(ingredientSchema).default([]),
   steps: z.array(stepSchema).default([]),
 });
@@ -30,6 +28,10 @@ export const createRecipeSchema = z.object({
 export const updateRecipeSchema = createRecipeSchema;
 
 export const patchRecipeSchema = createRecipeSchema.partial();
+
+export const removeGalleryImagesSchema = z.object({
+  paths: z.array(z.string().min(1)).min(1),
+});
 
 export const recipeQuerySchema = z.object({
   q: z.string().optional(),
@@ -46,4 +48,5 @@ export const recipeQuerySchema = z.object({
 export type CreateRecipeInput = z.infer<typeof createRecipeSchema>;
 export type UpdateRecipeInput = z.infer<typeof updateRecipeSchema>;
 export type PatchRecipeInput = z.infer<typeof patchRecipeSchema>;
+export type RemoveGalleryImagesInput = z.infer<typeof removeGalleryImagesSchema>;
 export type RecipeQuery = z.infer<typeof recipeQuerySchema>;

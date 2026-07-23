@@ -1,7 +1,13 @@
 import './registry'; // must be first — extends Zod prototype before schemas are used
 import { OpenAPIRegistry, OpenApiGeneratorV3 } from '@asteasolutions/zod-to-openapi';
 import { z } from 'zod';
-import { createRecipeSchema, updateRecipeSchema, patchRecipeSchema, recipeQuerySchema } from '../modules/recipes/recipe.schema';
+import {
+  createRecipeSchema,
+  updateRecipeSchema,
+  patchRecipeSchema,
+  recipeQuerySchema,
+  removeGalleryImagesSchema,
+} from '../modules/recipes/recipe.schema';
 import { provisionUserSchema, updateUserSchema } from '../modules/users/user.schema';
 import { createReviewSchema, reviewQuerySchema } from '../modules/reviews/review.schema';
 import {
@@ -155,6 +161,7 @@ const ReviewSchema = registry.register(
 const CreateRecipeBody = registry.register('CreateRecipeBody', createRecipeSchema);
 const UpdateRecipeBody = registry.register('UpdateRecipeBody', updateRecipeSchema);
 const PatchRecipeBody = registry.register('PatchRecipeBody', patchRecipeSchema);
+const RemoveGalleryImagesBody = registry.register('RemoveGalleryImagesBody', removeGalleryImagesSchema);
 const ProvisionUserBody = registry.register('ProvisionUserBody', provisionUserSchema);
 const UpdateUserBody = registry.register('UpdateUserBody', updateUserSchema);
 const CreateReviewBody = registry.register('CreateReviewBody', createReviewSchema);
@@ -426,6 +433,124 @@ registry.registerPath({
     401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
     403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
     404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/recipes/{recipeId}/cover-image',
+  tags: ['Recipes'],
+  summary: 'Upload cover image',
+  description:
+    'Uploads a single image (multipart/form-data, field "image"; JPEG/PNG/WEBP/GIF, max 5MB) to Cloudflare R2 ' +
+    'and sets it as the recipe cover, replacing any existing one.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+    body: {
+      content: {
+        'multipart/form-data': {
+          schema: {
+            type: 'object',
+            properties: { image: { type: 'string', format: 'binary' } },
+            required: ['image'],
+          },
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Updated recipe with the new cover image URL',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Missing/invalid file, or wrong type/size', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/recipes/{recipeId}/cover-image',
+  tags: ['Recipes'],
+  summary: 'Remove cover image',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Updated recipe with cover image cleared',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/recipes/{recipeId}/images',
+  tags: ['Recipes'],
+  summary: 'Add gallery images',
+  description:
+    'Uploads one or more images (multipart/form-data, field "images"; JPEG/PNG/WEBP/GIF, max 5MB each) to ' +
+    'Cloudflare R2 and appends them to the recipe gallery. The gallery is capped at 10 images total.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+    body: {
+      content: {
+        'multipart/form-data': {
+          schema: {
+            type: 'object',
+            properties: {
+              images: { type: 'array', items: { type: 'string', format: 'binary' } },
+            },
+            required: ['images'],
+          },
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Updated recipe with the new gallery images appended',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: {
+      description: 'Missing/invalid files, wrong type/size, or gallery would exceed 10 images',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/recipes/{recipeId}/images',
+  tags: ['Recipes'],
+  summary: 'Remove gallery images',
+  description: 'Removes the given relative storage paths from the recipe gallery and deletes them from R2.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: RemoveGalleryImagesBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Updated recipe with the given gallery images removed',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+    },
+    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
+    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
   },
 });
 

@@ -45,12 +45,14 @@ cookbook-backend/
 │   │   ├── env.ts              # Zod-validated env vars, exported as typed config object; exits on missing vars
 │   │   ├── database.ts         # Prisma client singleton
 │   │   ├── clerk.ts            # (removed — @clerk/express reads CLERK_SECRET_KEY from env automatically)
+│   │   ├── r2.ts                # Cloudflare R2 (S3-compatible) client singleton + R2_BUCKET_NAME constant
 │   │   ├── meilisearch.ts      # MeiliSearch client singleton + RECIPES_INDEX constant
 │   │   └── meilisearchSetup.ts # Configures index attributes on server startup (idempotent)
 │   ├── middlewares/
 │   │   ├── authenticate.ts     # Clerk JWT verification via getAuth(); dev bypass via x-dev-user-sub; returns 401 on failure
 │   │   ├── authorize.ts        # Ownership guard factory — verifies req.user.sub === resource owner authProviderId
 │   │   ├── validate.ts         # Zod middleware factory (body / query / params)
+│   │   ├── upload.ts            # multer memory-storage configs (uploadSingleImage / uploadImagesArray); translates multer errors to ApiError
 │   │   ├── verifyClerkWebhook.ts # Verifies Clerk webhook signature (svix headers); sets req.clerkEvent
 │   │   ├── errorHandler.ts     # Global Express error handler; maps ApiError → JSON; unknown → 500
 │   │   └── requestLogger.ts    # pino-http request logger with pino-pretty in development
@@ -80,6 +82,8 @@ cookbook-backend/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
 │   │   ├── tags/
 │   │   │   └── tag.service.ts         # upsertTags: upserts by slug, returns Tag[]
+│   │   ├── storage/
+│   │   │   └── storage.service.ts     # Generic image storage (storeImage/deleteImage/buildImageUrl) — reusable by any module, not recipe-specific
 │   │   └── webhooks/
 │   │       ├── clerk.webhook.router.ts     # POST /clerk — express.raw() body, mounted before express.json()
 │   │       └── clerk.webhook.controller.ts # Dispatches on event.type; calls into users module's public service fns
@@ -90,6 +94,7 @@ cookbook-backend/
 │   │   ├── ApiError.ts         # Custom error class: statusCode, message, code, details; static factories
 │   │   ├── asyncHandler.ts     # Wraps async route handlers; forwards rejections to next()
 │   │   ├── pagination.ts       # parsePaginationQuery, buildMeta, toSkip
+│   │   ├── imageSignature.ts    # detectImageType() — magic-byte sniffing (JPEG/PNG/WEBP/GIF), rejects SVG/unknown content
 │   │   └── slugify.ts          # slugify() + generateRecipeSlug() → "pasta-carbonara"
 │   ├── app.ts                  # Express app factory (no listen call); mounts all routes
 │   └── server.ts               # Entry point: first import is dotenv/config; creates app; graceful shutdown
@@ -177,7 +182,12 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `CLERK_PUBLISHABLE_KEY` | no | — | Clerk publishable key (optional for pure backend) |
 | `CLERK_WEBHOOK_SIGNING_SECRET` | yes | — | Clerk dashboard → Webhooks → Signing Secret (`whsec_...`); verifies `POST /webhooks/clerk` |
 | `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins |
-| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in `coverImageUrl` and `imageUrls` fields |
+| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in `RecipeStep.imageUrl` (legacy — recipe cover/gallery images now go through the R2 upload endpoints, not a raw URL field) |
+| `R2_ACCOUNT_ID` | yes | — | Cloudflare account id; builds the R2 S3-compatible endpoint `https://<id>.r2.cloudflarestorage.com` |
+| `R2_ACCESS_KEY_ID` | yes | — | R2 API token access key (Dashboard → R2 → Manage API Tokens) |
+| `R2_SECRET_ACCESS_KEY` | yes | — | R2 API token secret key |
+| `R2_BUCKET_NAME` | yes | — | R2 bucket used for recipe cover/gallery images |
+| `R2_PUBLIC_BASE_URL` | yes | — | Public bucket domain (r2.dev or custom domain); prepended to stored relative keys to build full image URLs |
 | `MEILISEARCH_URL` | no | `http://localhost:7700` | Meilisearch base URL |
 | `MEILISEARCH_API_KEY` | no | `masterkey` | Meilisearch master key (must match `MEILI_MASTER_KEY` in docker-compose) |
 | `LOG_LEVEL` | no | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` |
@@ -350,6 +360,10 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 | PUT | `/recipes/:recipeId` | Required + Owner | Full update (replaces ingredients, steps, tags atomically) |
 | PATCH | `/recipes/:recipeId` | Required + Owner | Partial update |
 | DELETE | `/recipes/:recipeId` | Required + Owner | Delete |
+| POST | `/recipes/:recipeId/cover-image` | Required + Owner | Upload cover image (multipart, field `image`) — replaces any existing cover |
+| DELETE | `/recipes/:recipeId/cover-image` | Required + Owner | Remove cover image |
+| POST | `/recipes/:recipeId/images` | Required + Owner | Add gallery images (multipart, field `images`, up to 10 files per request) |
+| DELETE | `/recipes/:recipeId/images` | Required + Owner | Remove gallery images by relative path |
 | GET | `/users/:userId/recipes` | Public | List recipes by a specific user (by DB id) |
 | GET | `/users/:username/recipes/:recipename` | Public | Get recipe by author username + slug (human-friendly URL) |
 
@@ -390,8 +404,6 @@ GET /api/v1/users/joao/recipes/pasta-carbonara
   "prepTimeMinutes": "number (optional, min 0)",
   "servings": "number (optional, min 1)",
   "difficulty": "number (optional, min 0 — numeric rating scale)",
-  "coverImageUrl": "string (optional, https url from TRUSTED_IMAGE_DOMAINS)",
-  "imageUrls": ["string (optional, https urls — gallery)"],
   "ingredients": [
     {
       "name": "string (required)",
@@ -413,6 +425,8 @@ GET /api/v1/users/joao/recipes/pasta-carbonara
 Ingredients are stored in the order they appear in the array (`order` is auto-assigned from array index).
 Steps must have unique `order` values per recipe.
 Slug is generated at creation from the title (no random suffix) and is **immutable**. It's unique **per author**, not globally (`@@unique([authorId, slug])`) — creating two recipes with the same title as the same author returns `409 CONFLICT`.
+
+**`coverImageUrl`/`imageUrls` are not part of this body.** They're server-managed: create the recipe first, then upload images against its id via the dedicated endpoints below. A new recipe is created with both fields empty.
 
 #### Recipe Full Detail Shape
 
@@ -465,9 +479,22 @@ Abbreviated — no full steps or ingredients:
 }
 ```
 
-#### Image Upload Strategy (Phase 1)
+#### Recipe Cover & Gallery Images (Cloudflare R2) — Phase 2
 
-The frontend uploads images directly to an object storage bucket (S3 or Cloudflare R2) and sends the resulting HTTPS URL as `coverImageUrl` (cover) or in the `imageUrls` array (gallery). The backend validates that each URL's hostname is in `TRUSTED_IMAGE_DOMAINS`. No multipart upload endpoint exists in Phase 1.
+The frontend uploads image bytes directly to the backend (multipart/form-data), not to storage directly. See [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage) below for the full pipeline. Summary:
+
+| Method | Path | Field(s) | Notes |
+|---|---|---|---|
+| POST | `/recipes/:recipeId/cover-image` | `image` (single file) | Replaces any existing cover; old object is deleted from R2 |
+| DELETE | `/recipes/:recipeId/cover-image` | — | Clears the cover; deletes the R2 object |
+| POST | `/recipes/:recipeId/images` | `images` (up to 10 files) | Appends to the gallery; **422** if the gallery would exceed 10 images total |
+| DELETE | `/recipes/:recipeId/images` | JSON body `{ "paths": ["recipes/<id>/gallery/<uuid>.jpg"] }` | Removes the given relative paths; deletes the R2 objects |
+
+All four require `authenticate` + the same owner guard as `PUT`/`PATCH`/`DELETE /recipes/:recipeId`, and a stricter `uploadLimiter` (30 requests / 15 min) than the rest of the recipes router (which currently has no rate limiter).
+
+Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, not just the declared `Content-Type`). SVG is explicitly rejected (XSS risk).
+
+`RecipeStep.imageUrl` (per-step images) is unchanged — still a plain `https url` field validated by Zod, not part of this pipeline. `User.avatarUrl` and `Review.imageUrls` are also unchanged; they can adopt `storage.service.ts` the same way later.
 
 ---
 
@@ -780,7 +807,8 @@ model CollectionFollower {
 - `Recipe.slug` is generated once at creation (the slugified title, no suffix) and is **immutable**.
 - `Recipe.difficulty` is a plain `Int?` — the numeric scale is defined by the frontend (e.g. 1–5 stars). No DB-level constraint beyond `min 0` enforced by Zod.
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
-- `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery.
+- `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery, capped at 10 entries.
+- `Recipe.coverImageUrl`/`Recipe.imageUrls` store **relative R2 storage keys** (e.g. `recipes/<id>/cover/<uuid>.jpg`), not full URLs — despite the field names, kept as-is to avoid a rename migration. `recipe.service.ts`'s format functions (`formatRecipeFull`/`formatRecipeListItem`) hydrate them to full URLs via `storage.service.ts#buildImageUrl` before any API response, so the wire contract is unchanged (still full `https://` URLs) while the storage provider can be swapped without touching stored data. See [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage).
 - `RecipeIngredient.name` is a plain string (no normalized `Ingredient` table). Phase 2 scope.
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2.
@@ -900,6 +928,42 @@ Meilisearch runs as a service in `docker/docker-compose.yml` on port `7700`. The
 
 ---
 
+## Cloudflare R2 Image Storage
+
+Generic, provider-agnostic image storage — currently used for recipe cover/gallery images, designed to be reused by other modules (avatars, reviews) later without rework. Postgres stores only a **relative storage key**; the storage provider can change without a data migration.
+
+### Pipeline
+
+```
+POST /recipes/:recipeId/(cover-image|images)
+  └─> upload.ts middleware        multer memoryStorage — buffers the file(s), cheap mimetype prefilter, 5MB limit, translates multer errors to ApiError/422
+        └─> recipe.service.ts     ownership already verified by authorize(); enforces the 10-image gallery cap
+              └─> storage.service.ts#storeImage
+                    ├─> imageSignature.ts#detectImageType   magic-byte check (JPEG/PNG/WEBP/GIF) — the real validation, not the client-declared Content-Type
+                    └─> r2Client.send(PutObjectCommand)      key: `<folder>/<uuid>.<ext>`, e.g. recipes/<id>/cover/<uuid>.jpg
+              recipe.<coverImageUrl|imageUrls> updated with the relative key(s)
+```
+
+### `src/modules/storage/storage.service.ts`
+
+| Function | Behavior |
+|---|---|
+| `storeImage(buffer, folder)` | Validates content via `detectImageType`, uploads to R2, returns the relative key. Throws `ApiError.validation(...)` on unrecognized/disallowed content. |
+| `deleteImage(key)` | Fire-and-forget from callers (errors are caught internally and logged, never thrown) — same pattern as the Meilisearch sync functions in `recipe.search.ts`. |
+| `buildImageUrl(key)` / `buildImageUrls(keys)` | Prepends `R2_PUBLIC_BASE_URL` — the single seam where stored relative paths become the full-URL API contract. |
+
+### Cleanup
+
+- Replacing a cover image deletes the old R2 object.
+- Removing gallery images (`DELETE /recipes/:recipeId/images`) deletes the corresponding R2 objects.
+- `deleteRecipe` fire-and-forget deletes the cover key and every gallery key (the row is loaded before the DB delete, so no bucket `ListObjectsV2` call is needed).
+
+### Package choice
+
+`@aws-sdk/client-s3` — R2 exposes an S3-compatible API. No content-sniffing library dependency (e.g. `file-type`) is used; `imageSignature.ts` is a small hand-written magic-byte check instead, to avoid a repeat of the `meilisearch@0.38+` ESM-only pinning trap (most such libraries dropped CommonJS support in recent majors).
+
+---
+
 ## Testing
 
 ### Running Tests
@@ -910,7 +974,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (134 passing)
+### Unit Tests (171 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -920,8 +984,10 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
 | `tests/unit/users/user.service.test.ts` | 24 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 21 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `minRating` filter, `sortBy=averageRating` |
+| `tests/unit/recipes/recipe.service.test.ts` | 33 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, 10-image gallery cap, image cleanup on recipe delete |
 | `tests/unit/recipes/recipe.search.test.ts` | 11 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping, `minRating` filter clause, `updateIndexedRecipeRating` partial document sync |
+| `tests/unit/storage/storage.service.test.ts` | 7 | `storeImage` (valid image uploaded + keyed correctly, invalid content rejected via `ApiError.validation`), `deleteImage`, `buildImageUrl`/`buildImageUrls` |
+| `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/reviews/review.service.test.ts` | 10 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorKeycloakId (found, null) |
 | `tests/unit/collections/collection.service.test.ts` | 25 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes, followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerKeycloakId |
 | `tests/unit/middlewares/authenticate.test.ts` | 8 | Dev bypass, missing/non-Bearer header, valid token, expired token, null payload, JWKS key resolution |
@@ -934,6 +1000,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 - Mock `../../../src/modules/tags/tag.service` to isolate tag upsert
 - Mock `../../../src/utils/slugify` to control slug output
 - Mock `../../../src/modules/recipes/recipe.search` in recipe service tests — prevents the Meilisearch import chain from triggering `env.ts` validation
+- Mock `../../../src/modules/storage/storage.service` in recipe service tests, and `../../../src/config/r2` (S3 client) + `../../../src/config/env` in storage service tests
 - Mock `../../../src/config/env` and `../../../src/config/keycloak` for middleware tests; include `MEILISEARCH_URL` and `MEILISEARCH_API_KEY` in the env mock object
 - Mock `@clerk/express/webhooks` (`verifyWebhook`) for `verifyClerkWebhook` tests, and `../../../src/modules/users/user.service` for webhook controller tests
 - Use `vi.mock(path)` — paths are relative to the test file, not the project root
@@ -1056,3 +1123,16 @@ Both run via `docker/docker-compose.yml`.
 - [x] `user.updated` → no-op (logged only) — app-owned profile fields are not overwritten by Clerk
 - [x] Documented in OpenAPI spec (`src/docs/openapi.ts`)
 - [x] Unit tests: signature verification middleware, controller event dispatch, service provision/delete paths (20 new tests)
+
+### Milestone 9 — Recipe Image Storage (Cloudflare R2) ✅
+- [x] `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` / `R2_PUBLIC_BASE_URL` env vars, validated by `env.ts`
+- [x] `src/config/r2.ts` — S3-compatible client singleton for R2
+- [x] `src/utils/imageSignature.ts` — magic-byte content validation (JPEG/PNG/WEBP/GIF), rejects SVG/unknown
+- [x] `src/modules/storage/storage.service.ts` — generic `storeImage`/`deleteImage`/`buildImageUrl(s)`, reusable by any module
+- [x] `src/middlewares/upload.ts` — multer memory-storage configs, multer errors translated to `ApiError`/422
+- [x] `POST`/`DELETE /recipes/:recipeId/cover-image` and `POST`/`DELETE /recipes/:recipeId/images` — owner-only, rate-limited
+- [x] Gallery capped at 10 images total, enforced server-side against the existing count
+- [x] `coverImageUrl`/`imageUrls` removed from `POST`/`PUT`/`PATCH /recipes` bodies — server-managed via the upload endpoints only
+- [x] Old R2 objects cleaned up on cover replace, gallery image removal, and recipe delete
+- [x] Documented in OpenAPI spec (`src/docs/openapi.ts`)
+- [x] Unit tests: storage service, image signature detection, recipe service upload/delete/cap-enforcement paths

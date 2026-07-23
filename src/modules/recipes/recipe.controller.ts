@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
+import { ApiError } from '../../utils/ApiError';
 import * as recipeService from './recipe.service';
 import {
   CreateRecipeInput,
   PatchRecipeInput,
   RecipeQuery,
+  RemoveGalleryImagesInput,
   UpdateRecipeInput,
 } from './recipe.schema';
 
@@ -60,4 +62,38 @@ export async function listRecipesByUser(req: Request, res: Response): Promise<vo
     req.query as unknown as RecipeQuery,
   );
   res.json({ success: true, ...result });
+}
+
+export async function uploadCoverImage(req: Request, res: Response): Promise<void> {
+  if (!req.file) throw ApiError.validation({ image: ['No image file was provided'] });
+
+  const recipe = await recipeService.uploadCoverImage(
+    req.params.recipeId as string,
+    req.file.buffer,
+  );
+  res.json({ success: true, data: recipe });
+}
+
+export async function deleteCoverImage(req: Request, res: Response): Promise<void> {
+  const recipe = await recipeService.deleteCoverImage(req.params.recipeId as string);
+  res.json({ success: true, data: recipe });
+}
+
+export async function addGalleryImages(req: Request, res: Response): Promise<void> {
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  if (files.length === 0) throw ApiError.validation({ images: ['No image files were provided'] });
+
+  const recipe = await recipeService.addGalleryImages(
+    req.params.recipeId as string,
+    files.map((file) => file.buffer),
+  );
+  res.json({ success: true, data: recipe });
+}
+
+export async function removeGalleryImages(req: Request, res: Response): Promise<void> {
+  const recipe = await recipeService.removeGalleryImages(
+    req.params.recipeId as string,
+    (req.body as RemoveGalleryImagesInput).paths,
+  );
+  res.json({ success: true, data: recipe });
 }

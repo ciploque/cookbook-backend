@@ -15,6 +15,12 @@ const envSchema = z.object({
 
   TRUSTED_IMAGE_DOMAINS: z.string().default(''),
 
+  R2_ACCOUNT_ID: z.string().min(1),
+  R2_ACCESS_KEY_ID: z.string().min(1),
+  R2_SECRET_ACCESS_KEY: z.string().min(1),
+  R2_BUCKET_NAME: z.string().min(1),
+  R2_PUBLIC_BASE_URL: z.string().url(),
+
   MEILISEARCH_URL: z.string().url().default('http://localhost:7700'),
   MEILISEARCH_API_KEY: z.string().default('masterkey'),
 

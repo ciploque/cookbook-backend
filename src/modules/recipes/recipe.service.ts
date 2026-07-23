@@ -4,6 +4,7 @@ import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { generateRecipeSlug } from '../../utils/slugify';
 import { upsertTags } from '../tags/tag.service';
+import { buildImageUrl, buildImageUrls, deleteImage, storeImage } from '../storage/storage.service';
 import { CreateRecipeInput, PatchRecipeInput, RecipeQuery, UpdateRecipeInput } from './recipe.schema';
 import {
   RecipeSearchDocument,
@@ -13,6 +14,8 @@ import {
   updateIndexedRecipe,
 } from './recipe.search';
 
+const MAX_GALLERY_IMAGES = 10;
+
 const recipeFullInclude = {
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
   ingredients: { orderBy: { order: 'asc' as const } },
@@ -21,8 +24,13 @@ const recipeFullInclude = {
 } satisfies Prisma.RecipeInclude;
 
 function formatRecipeFull(recipe: Prisma.RecipeGetPayload<{ include: typeof recipeFullInclude }>) {
-  const { recipeTags, ...rest } = recipe;
-  return { ...rest, tags: recipeTags.map((rt) => rt.tag.slug) };
+  const { recipeTags, coverImageUrl, imageUrls, ...rest } = recipe;
+  return {
+    ...rest,
+    tags: recipeTags.map((rt) => rt.tag.slug),
+    coverImageUrl: coverImageUrl ? buildImageUrl(coverImageUrl) : null,
+    imageUrls: buildImageUrls(imageUrls),
+  };
 }
 
 function toSearchDocument(
@@ -67,11 +75,13 @@ const recipeListSelect = {
 function formatRecipeListItem(
   recipe: Prisma.RecipeGetPayload<{ select: typeof recipeListSelect }>,
 ) {
-  const { recipeTags, description, ...rest } = recipe;
+  const { recipeTags, description, coverImageUrl, imageUrls, ...rest } = recipe;
   return {
     ...rest,
     description: (description ?? '').slice(0, 200),
     tags: recipeTags.map((rt) => rt.tag.slug),
+    coverImageUrl: coverImageUrl ? buildImageUrl(coverImageUrl) : null,
+    imageUrls: buildImageUrls(imageUrls),
   };
 }
 
@@ -152,8 +162,8 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
       title: input.title,
       description: input.description,
       category: input.category,
-      coverImageUrl: input.coverImageUrl,
-      imageUrls: input.imageUrls,
+      coverImageUrl: null,
+      imageUrls: [],
       prepTimeMinutes: input.prepTimeMinutes,
       servings: input.servings,
       difficulty: input.difficulty,
@@ -190,8 +200,6 @@ export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
         title: input.title,
         description: input.description,
         category: input.category,
-        coverImageUrl: input.coverImageUrl,
-        imageUrls: input.imageUrls,
         prepTimeMinutes: input.prepTimeMinutes,
         servings: input.servings,
         difficulty: input.difficulty,
@@ -237,8 +245,6 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
         ...(input.title !== undefined && { title: input.title }),
         ...(input.description !== undefined && { description: input.description }),
         ...(input.category !== undefined && { category: input.category }),
-        ...(input.coverImageUrl !== undefined && { coverImageUrl: input.coverImageUrl }),
-        ...(input.imageUrls !== undefined && { imageUrls: input.imageUrls }),
         ...(input.prepTimeMinutes !== undefined && { prepTimeMinutes: input.prepTimeMinutes }),
         ...(input.servings !== undefined && { servings: input.servings }),
         ...(input.difficulty !== undefined && { difficulty: input.difficulty }),
@@ -266,8 +272,93 @@ export async function deleteRecipe(recipeId: string): Promise<void> {
   if (!existing) throw ApiError.notFound('Recipe');
   await prisma.recipe.delete({ where: { id: recipeId } });
   void deleteIndexedRecipe(recipeId);
+
+  if (existing.coverImageUrl) void deleteImage(existing.coverImageUrl);
+  existing.imageUrls.forEach((key) => void deleteImage(key));
 }
 
 export async function listRecipesByUser(userId: string, query: RecipeQuery) {
   return listRecipes({ ...query, authorId: userId });
+}
+
+export async function uploadCoverImage(recipeId: string, buffer: Buffer) {
+  const existing = await prisma.recipe.findUnique({ where: { id: recipeId } });
+  if (!existing) throw ApiError.notFound('Recipe');
+
+  const key = await storeImage(buffer, `recipes/${recipeId}/cover`);
+  if (existing.coverImageUrl) void deleteImage(existing.coverImageUrl);
+
+  const recipe = await prisma.recipe.update({
+    where: { id: recipeId },
+    data: { coverImageUrl: key },
+    include: recipeFullInclude,
+  });
+
+  const formatted = formatRecipeFull(recipe);
+  void updateIndexedRecipe(toSearchDocument(formatted));
+  return formatted;
+}
+
+export async function deleteCoverImage(recipeId: string) {
+  const existing = await prisma.recipe.findUnique({ where: { id: recipeId } });
+  if (!existing) throw ApiError.notFound('Recipe');
+
+  if (existing.coverImageUrl) void deleteImage(existing.coverImageUrl);
+
+  const recipe = await prisma.recipe.update({
+    where: { id: recipeId },
+    data: { coverImageUrl: null },
+    include: recipeFullInclude,
+  });
+
+  const formatted = formatRecipeFull(recipe);
+  void updateIndexedRecipe(toSearchDocument(formatted));
+  return formatted;
+}
+
+export async function addGalleryImages(recipeId: string, buffers: Buffer[]) {
+  const existing = await prisma.recipe.findUnique({ where: { id: recipeId } });
+  if (!existing) throw ApiError.notFound('Recipe');
+
+  if (existing.imageUrls.length + buffers.length > MAX_GALLERY_IMAGES) {
+    throw ApiError.validation({
+      images: [
+        `Maximum of ${MAX_GALLERY_IMAGES} images allowed in gallery ` +
+          `(currently ${existing.imageUrls.length}, tried to add ${buffers.length})`,
+      ],
+    });
+  }
+
+  const newKeys = await Promise.all(
+    buffers.map((buffer) => storeImage(buffer, `recipes/${recipeId}/gallery`)),
+  );
+
+  const recipe = await prisma.recipe.update({
+    where: { id: recipeId },
+    data: { imageUrls: [...existing.imageUrls, ...newKeys] },
+    include: recipeFullInclude,
+  });
+
+  const formatted = formatRecipeFull(recipe);
+  void updateIndexedRecipe(toSearchDocument(formatted));
+  return formatted;
+}
+
+export async function removeGalleryImages(recipeId: string, paths: string[]) {
+  const existing = await prisma.recipe.findUnique({ where: { id: recipeId } });
+  if (!existing) throw ApiError.notFound('Recipe');
+
+  const toRemove = new Set(paths);
+  const remaining = existing.imageUrls.filter((key) => !toRemove.has(key));
+  existing.imageUrls.filter((key) => toRemove.has(key)).forEach((key) => void deleteImage(key));
+
+  const recipe = await prisma.recipe.update({
+    where: { id: recipeId },
+    data: { imageUrls: remaining },
+    include: recipeFullInclude,
+  });
+
+  const formatted = formatRecipeFull(recipe);
+  void updateIndexedRecipe(toSearchDocument(formatted));
+  return formatted;
 }
