@@ -4,7 +4,7 @@ import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { generateRecipeSlug } from '../../utils/slugify';
 import { upsertTags } from '../tags/tag.service';
-import { buildImageUrl, buildImageUrls, deleteImage, storeImage } from '../storage/storage.service';
+import { deleteImage, storeImage } from '../storage/storage.service';
 import { CreateRecipeInput, PatchRecipeInput, RecipeQuery, UpdateRecipeInput } from './recipe.schema';
 import {
   RecipeSearchDocument,
@@ -24,13 +24,8 @@ const recipeFullInclude = {
 } satisfies Prisma.RecipeInclude;
 
 function formatRecipeFull(recipe: Prisma.RecipeGetPayload<{ include: typeof recipeFullInclude }>) {
-  const { recipeTags, coverImageUrl, imageUrls, ...rest } = recipe;
-  return {
-    ...rest,
-    tags: recipeTags.map((rt) => rt.tag.slug),
-    coverImageUrl: coverImageUrl ? buildImageUrl(coverImageUrl) : null,
-    imageUrls: buildImageUrls(imageUrls),
-  };
+  const { recipeTags, ...rest } = recipe;
+  return { ...rest, tags: recipeTags.map((rt) => rt.tag.slug) };
 }
 
 function toSearchDocument(
@@ -75,13 +70,11 @@ const recipeListSelect = {
 function formatRecipeListItem(
   recipe: Prisma.RecipeGetPayload<{ select: typeof recipeListSelect }>,
 ) {
-  const { recipeTags, description, coverImageUrl, imageUrls, ...rest } = recipe;
+  const { recipeTags, description, ...rest } = recipe;
   return {
     ...rest,
     description: (description ?? '').slice(0, 200),
     tags: recipeTags.map((rt) => rt.tag.slug),
-    coverImageUrl: coverImageUrl ? buildImageUrl(coverImageUrl) : null,
-    imageUrls: buildImageUrls(imageUrls),
   };
 }
 

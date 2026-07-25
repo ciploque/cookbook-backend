@@ -24,3 +24,8 @@ export async function getUserById(req: Request, res: Response): Promise<void> {
   const user = await userService.getUserById(req.params.userId as string);
   res.json({ success: true, data: user });
 }
+
+export async function getUserByUsername(req: Request, res: Response): Promise<void> {
+  const user = await userService.getUserByUsername(req.params.username as string);
+  res.json({ success: true, data: user });
+}

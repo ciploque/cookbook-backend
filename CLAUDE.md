@@ -83,7 +83,7 @@ cookbook-backend/
 │   │   ├── tags/
 │   │   │   └── tag.service.ts         # upsertTags: upserts by slug, returns Tag[]
 │   │   ├── storage/
-│   │   │   └── storage.service.ts     # Generic image storage (storeImage/deleteImage/buildImageUrl) — reusable by any module, not recipe-specific
+│   │   │   └── storage.service.ts     # Generic image storage (storeImage/deleteImage/buildImageUrl) — relative leading-slash paths only, no full URLs; reusable by any module
 │   │   └── webhooks/
 │   │       ├── clerk.webhook.router.ts     # POST /clerk — express.raw() body, mounted before express.json()
 │   │       └── clerk.webhook.controller.ts # Dispatches on event.type; calls into users module's public service fns
@@ -187,7 +187,6 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `R2_ACCESS_KEY_ID` | yes | — | R2 API token access key (Dashboard → R2 → Manage API Tokens) |
 | `R2_SECRET_ACCESS_KEY` | yes | — | R2 API token secret key |
 | `R2_BUCKET_NAME` | yes | — | R2 bucket used for recipe cover/gallery images |
-| `R2_PUBLIC_BASE_URL` | yes | — | Public bucket domain (r2.dev or custom domain); prepended to stored relative keys to build full image URLs |
 | `MEILISEARCH_URL` | no | `http://localhost:7700` | Meilisearch base URL |
 | `MEILISEARCH_API_KEY` | no | `masterkey` | Meilisearch master key (must match `MEILI_MASTER_KEY` in docker-compose) |
 | `LOG_LEVEL` | no | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` |
@@ -300,6 +299,7 @@ All responses use a consistent shape:
 | GET | `/users/me` | Required | Get own profile |
 | PUT | `/users/me` | Required | Update own profile |
 | GET | `/users/:userId` | Public | Get public user profile by DB id |
+| GET | `/users/username/:username` | Public | Get public user profile by username (pretty-URL alternative to the above; same response shape) |
 
 #### POST /users/me
 
@@ -346,7 +346,7 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 }
 ```
 
-**Note:** `authProviderId` is omitted from the public `GET /users/:userId` response.
+**Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses.
 
 ---
 
@@ -488,11 +488,13 @@ The frontend uploads image bytes directly to the backend (multipart/form-data), 
 | POST | `/recipes/:recipeId/cover-image` | `image` (single file) | Replaces any existing cover; old object is deleted from R2 |
 | DELETE | `/recipes/:recipeId/cover-image` | — | Clears the cover; deletes the R2 object |
 | POST | `/recipes/:recipeId/images` | `images` (up to 10 files) | Appends to the gallery; **422** if the gallery would exceed 10 images total |
-| DELETE | `/recipes/:recipeId/images` | JSON body `{ "paths": ["recipes/<id>/gallery/<uuid>.jpg"] }` | Removes the given relative paths; deletes the R2 objects |
+| DELETE | `/recipes/:recipeId/images` | JSON body `{ "paths": ["/recipes/<id>/gallery/<uuid>.jpg"] }` | Removes the given relative paths; deletes the R2 objects |
 
 All four require `authenticate` + the same owner guard as `PUT`/`PATCH`/`DELETE /recipes/:recipeId`, and a stricter `uploadLimiter` (30 requests / 15 min) than the rest of the recipes router (which currently has no rate limiter).
 
 Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, not just the declared `Content-Type`). SVG is explicitly rejected (XSS risk).
+
+**No full URLs:** `coverImageUrl`/`imageUrls` in every recipe API response are relative paths with a leading `/` (e.g. `/recipes/<id>/cover/<uuid>.jpg`), never a full `https://` URL. The frontend prepends its own base/CDN URL. `DELETE /recipes/:recipeId/images` expects `paths` to be the exact leading-slash values as returned in `imageUrls`.
 
 `RecipeStep.imageUrl` (per-step images) is unchanged — still a plain `https url` field validated by Zod, not part of this pipeline. `User.avatarUrl` and `Review.imageUrls` are also unchanged; they can adopt `storage.service.ts` the same way later.
 
@@ -641,8 +643,8 @@ datasource db {
 }
 
 model User {
-  id          String   @id @default(uuid())
-  authProviderId  String   @unique           // Clerk userId (sub claim) — stable external key
+  id          String   @id @default(uuid(7)) @db.Uuid  // time-ordered UUID, native uuid column — see Schema decisions
+  authProviderId  String   @unique           // Clerk userId (sub claim) — stable external key; NOT a uuid (Clerk's own id format), stays text
   username    String   @unique           // URL-safe handle: ^[a-z0-9_-]+$, 3–30 chars
   displayName String
   bio         String?
@@ -656,7 +658,7 @@ model User {
 }
 
 model Recipe {
-  id              String   @id @default(uuid())
+  id              String   @id @default(uuid(7)) @db.Uuid
   slug            String                // unique per author (not globally); see @@unique below
   title           String
   description     String?
@@ -666,7 +668,7 @@ model Recipe {
   prepTimeMinutes Int?
   servings        Int?
   difficulty      Int?                  // numeric rating — no fixed scale enforced by DB
-  authorId        String
+  authorId        String   @db.Uuid
   reviewCount     Int      @default(0) // denormalized from Review — see Schema decisions
   ratingSum       Int      @default(0) // denormalized sum of Review.rating; averageRating = ratingSum / reviewCount
   averageRating   Float?                // null when reviewCount = 0
@@ -688,8 +690,8 @@ model Recipe {
 
 // Ingredients are stored inline per recipe (not normalized) in Phase 1.
 model RecipeIngredient {
-  id       String  @id @default(uuid())
-  recipeId String
+  id       String  @id @default(uuid(7)) @db.Uuid
+  recipeId String  @db.Uuid
   name     String
   quantity Float?
   unit     String?
@@ -703,8 +705,8 @@ model RecipeIngredient {
 }
 
 model RecipeStep {
-  id          String  @id @default(uuid())
-  recipeId    String
+  id          String  @id @default(uuid(7)) @db.Uuid
+  recipeId    String  @db.Uuid
   order       Int
   instruction String
   imageUrl    String?
@@ -718,7 +720,7 @@ model RecipeStep {
 
 // Tags are normalized: shared across recipes via join table.
 model Tag {
-  id   String @id @default(uuid())
+  id   String @id @default(uuid(7)) @db.Uuid
   name String @unique
   slug String @unique
 
@@ -728,20 +730,21 @@ model Tag {
 }
 
 model RecipeTag {
-  recipeId String
-  tagId    String
+  recipeId String @db.Uuid
+  tagId    String @db.Uuid
 
   recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
   tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
 
   @@id([recipeId, tagId])
+  @@index([tagId])                      // reverse lookup ("recipes with tag X") — the composite PK alone only covers recipeId
   @@map("recipe_tags")
 }
 
 model Review {
-  id        String   @id @default(uuid())
-  recipeId  String
-  authorId  String
+  id        String   @id @default(uuid(7)) @db.Uuid
+  recipeId  String   @db.Uuid
+  authorId  String   @db.Uuid
   rating    Int                       // mandatory; Zod enforces 1–5
   content   String?
   imageUrls String[]
@@ -758,8 +761,8 @@ model Review {
 }
 
 model Collection {
-  id          String   @id @default(uuid())
-  ownerId     String
+  id          String   @id @default(uuid(7)) @db.Uuid
+  ownerId     String   @db.Uuid
   name        String
   description String?
   isPublic    Boolean  @default(false)
@@ -776,8 +779,8 @@ model Collection {
 
 // Recipe membership with explicit ordering. Composite PK prevents duplicate recipe in same collection.
 model CollectionRecipe {
-  collectionId String
-  recipeId     String
+  collectionId String @db.Uuid
+  recipeId     String @db.Uuid
   order        Int
 
   collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
@@ -785,30 +788,33 @@ model CollectionRecipe {
 
   @@id([collectionId, recipeId])
   @@index([collectionId])
+  @@index([recipeId])                   // reverse lookup ("collections containing recipe X")
   @@map("collection_recipes")
 }
 
 model CollectionFollower {
-  collectionId String
-  userId       String
+  collectionId String @db.Uuid
+  userId       String @db.Uuid
   createdAt    DateTime @default(now())
 
   collection Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
   user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([collectionId, userId])
+  @@index([userId])                     // reverse lookup ("collections user X follows")
   @@map("collection_followers")
 }
 ```
 
 **Schema decisions:**
+- All surrogate ids and FK columns use the native Postgres `uuid` type (`@db.Uuid`), not `text`. IDs are generated client-side as UUIDv7 (`@default(uuid(7))`, Prisma ≥5.14) rather than v4: v7 embeds a millisecond timestamp in the high bits so inserts stay roughly time-ordered (better B-tree locality on write-heavy tables) while keeping ~74 bits of randomness — equally unguessable/non-enumerable as v4 for this threat model. `User.authProviderId` is the one exception: it's Clerk's own external id format (not a UUID), so it stays `text`.
 - `User.username` is a unique, URL-safe handle used in human-friendly recipe URLs (`/users/:username/recipes/:slug`).
 - `Recipe.slug` is unique **per author** (`@@unique([authorId, slug])`), not globally. Two different users can have recipes with the same slug.
 - `Recipe.slug` is generated once at creation (the slugified title, no suffix) and is **immutable**.
 - `Recipe.difficulty` is a plain `Int?` — the numeric scale is defined by the frontend (e.g. 1–5 stars). No DB-level constraint beyond `min 0` enforced by Zod.
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
 - `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery, capped at 10 entries.
-- `Recipe.coverImageUrl`/`Recipe.imageUrls` store **relative R2 storage keys** (e.g. `recipes/<id>/cover/<uuid>.jpg`), not full URLs — despite the field names, kept as-is to avoid a rename migration. `recipe.service.ts`'s format functions (`formatRecipeFull`/`formatRecipeListItem`) hydrate them to full URLs via `storage.service.ts#buildImageUrl` before any API response, so the wire contract is unchanged (still full `https://` URLs) while the storage provider can be swapped without touching stored data. See [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage).
+- `Recipe.coverImageUrl`/`Recipe.imageUrls` store **relative paths with a leading `/`** (e.g. `/recipes/<id>/cover/<uuid>.jpg`), not full URLs — despite the field names, kept as-is to avoid a rename migration. The API returns these paths as-is (no hydration); the frontend prepends its own base/CDN URL. `storage.service.ts#storeImage` is what produces the leading-slash form. See [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage).
 - `RecipeIngredient.name` is a plain string (no normalized `Ingredient` table). Phase 2 scope.
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2.
@@ -930,7 +936,7 @@ Meilisearch runs as a service in `docker/docker-compose.yml` on port `7700`. The
 
 ## Cloudflare R2 Image Storage
 
-Generic, provider-agnostic image storage — currently used for recipe cover/gallery images, designed to be reused by other modules (avatars, reviews) later without rework. Postgres stores only a **relative storage key**; the storage provider can change without a data migration.
+Generic, provider-agnostic image storage — currently used for recipe cover/gallery images, designed to be reused by other modules (avatars, reviews) later without rework. Postgres stores (and the API returns) only a **relative path with a leading `/`**; the backend never builds a full URL — the storage provider can change, and the frontend's base/CDN URL can change, without touching stored data or the API contract.
 
 ### Pipeline
 
@@ -940,17 +946,18 @@ POST /recipes/:recipeId/(cover-image|images)
         └─> recipe.service.ts     ownership already verified by authorize(); enforces the 10-image gallery cap
               └─> storage.service.ts#storeImage
                     ├─> imageSignature.ts#detectImageType   magic-byte check (JPEG/PNG/WEBP/GIF) — the real validation, not the client-declared Content-Type
-                    └─> r2Client.send(PutObjectCommand)      key: `<folder>/<uuid>.<ext>`, e.g. recipes/<id>/cover/<uuid>.jpg
-              recipe.<coverImageUrl|imageUrls> updated with the relative key(s)
+                    ├─> r2Client.send(PutObjectCommand)      real R2 key (no leading slash): `<folder>/<uuid>.<ext>`, e.g. recipes/<id>/cover/<uuid>.jpg
+                    └─> returns buildImageUrl(key)           leading-slash path, e.g. /recipes/<id>/cover/<uuid>.jpg
+              recipe.<coverImageUrl|imageUrls> updated with the returned path(s)
 ```
 
 ### `src/modules/storage/storage.service.ts`
 
 | Function | Behavior |
 |---|---|
-| `storeImage(buffer, folder)` | Validates content via `detectImageType`, uploads to R2, returns the relative key. Throws `ApiError.validation(...)` on unrecognized/disallowed content. |
-| `deleteImage(key)` | Fire-and-forget from callers (errors are caught internally and logged, never thrown) — same pattern as the Meilisearch sync functions in `recipe.search.ts`. |
-| `buildImageUrl(key)` / `buildImageUrls(keys)` | Prepends `R2_PUBLIC_BASE_URL` — the single seam where stored relative paths become the full-URL API contract. |
+| `storeImage(buffer, folder)` | Validates content via `detectImageType`, uploads to R2 under the unprefixed key, returns the leading-slash path (`buildImageUrl(key)`). Throws `ApiError.validation(...)` on unrecognized/disallowed content. |
+| `deleteImage(path)` | Accepts the stored leading-slash path, strips the `/` back off to reconstruct the real R2 key before deleting. Fire-and-forget from callers (errors are caught internally and logged, never thrown) — same pattern as the Meilisearch sync functions in `recipe.search.ts`. |
+| `buildImageUrl(key)` | `` `/${key}` `` — the single seam where a raw R2 key becomes the leading-slash path stored in Postgres and returned by the API. |
 
 ### Cleanup
 
@@ -974,7 +981,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (171 passing)
+### Unit Tests (170 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -986,7 +993,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/users/user.service.test.ts` | 24 | Provision (create/idempotent/conflict/unexpected error), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
 | `tests/unit/recipes/recipe.service.test.ts` | 33 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, 10-image gallery cap, image cleanup on recipe delete |
 | `tests/unit/recipes/recipe.search.test.ts` | 11 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping, `minRating` filter clause, `updateIndexedRecipeRating` partial document sync |
-| `tests/unit/storage/storage.service.test.ts` | 7 | `storeImage` (valid image uploaded + keyed correctly, invalid content rejected via `ApiError.validation`), `deleteImage`, `buildImageUrl`/`buildImageUrls` |
+| `tests/unit/storage/storage.service.test.ts` | 6 | `storeImage` (returns leading-slash path, uploads to R2 with the unprefixed key, invalid content rejected via `ApiError.validation`), `deleteImage` (strips leading slash before the R2 call), `buildImageUrl` |
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/reviews/review.service.test.ts` | 10 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorKeycloakId (found, null) |
 | `tests/unit/collections/collection.service.test.ts` | 25 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes, followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerKeycloakId |
@@ -1125,10 +1132,10 @@ Both run via `docker/docker-compose.yml`.
 - [x] Unit tests: signature verification middleware, controller event dispatch, service provision/delete paths (20 new tests)
 
 ### Milestone 9 — Recipe Image Storage (Cloudflare R2) ✅
-- [x] `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` / `R2_PUBLIC_BASE_URL` env vars, validated by `env.ts`
+- [x] `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET_NAME` env vars, validated by `env.ts`
 - [x] `src/config/r2.ts` — S3-compatible client singleton for R2
 - [x] `src/utils/imageSignature.ts` — magic-byte content validation (JPEG/PNG/WEBP/GIF), rejects SVG/unknown
-- [x] `src/modules/storage/storage.service.ts` — generic `storeImage`/`deleteImage`/`buildImageUrl(s)`, reusable by any module
+- [x] `src/modules/storage/storage.service.ts` — generic `storeImage`/`deleteImage`/`buildImageUrl`, reusable by any module. Relative leading-slash paths only — no full URLs; the frontend prepends its own base URL
 - [x] `src/middlewares/upload.ts` — multer memory-storage configs, multer errors translated to `ApiError`/422
 - [x] `POST`/`DELETE /recipes/:recipeId/cover-image` and `POST`/`DELETE /recipes/:recipeId/images` — owner-only, rate-limited
 - [x] Gallery capped at 10 images total, enforced server-side against the existing count

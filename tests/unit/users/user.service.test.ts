@@ -18,6 +18,7 @@ import {
   getMe,
   updateMe,
   getUserById,
+  getUserByUsername,
   provisionFromWebhook,
   deleteUserByAuthProviderId,
   ClerkWebhookUserData,
@@ -185,6 +186,30 @@ describe('getUserById()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
     await expect(getUserById('missing-id')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'USER_NOT_FOUND',
+    });
+  });
+});
+
+// ─── getUserByUsername ───────────────────────────────────────────────────────
+
+describe('getUserByUsername()', () => {
+  it('returns the user without authProviderId (public field)', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
+
+    const result = await getUserByUsername('joao');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { username: 'joao' } });
+    expect(result).not.toHaveProperty('authProviderId');
+    expect(result).toHaveProperty('id', 'user-uuid-1');
+    expect(result).toHaveProperty('username', 'joao');
+  });
+
+  it('throws USER_NOT_FOUND (404) when username does not exist', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
+    await expect(getUserByUsername('missing-username')).rejects.toMatchObject({
       statusCode: 404,
       code: 'USER_NOT_FOUND',
     });

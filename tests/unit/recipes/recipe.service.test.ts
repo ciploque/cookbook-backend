@@ -37,8 +37,6 @@ vi.mock('../../../src/modules/recipes/recipe.search', () => ({
 vi.mock('../../../src/modules/storage/storage.service', () => ({
   storeImage: vi.fn(),
   deleteImage: vi.fn(),
-  buildImageUrl: vi.fn((key: string) => `https://cdn.example.com/${key}`),
-  buildImageUrls: vi.fn((keys: string[]) => keys.map((k) => `https://cdn.example.com/${k}`)),
 }));
 
 import { prisma } from '../../../src/config/database';
@@ -283,16 +281,16 @@ describe('deleteRecipe()', () => {
   it('cleans up the cover and gallery R2 objects after deleting', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
-      coverImageUrl: 'recipes/recipe-uuid/cover/old.jpg',
-      imageUrls: ['recipes/recipe-uuid/gallery/a.jpg', 'recipes/recipe-uuid/gallery/b.jpg'],
+      coverImageUrl: '/recipes/recipe-uuid/cover/old.jpg',
+      imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg', '/recipes/recipe-uuid/gallery/b.jpg'],
     } as never);
     vi.mocked(prisma.recipe.delete).mockResolvedValue(mockRecipeFull as never);
 
     await deleteRecipe('recipe-uuid');
 
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/cover/old.jpg');
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/gallery/a.jpg');
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/gallery/b.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/cover/old.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/a.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/b.jpg');
   });
 });
 
@@ -431,32 +429,32 @@ describe('uploadCoverImage()', () => {
   it('stores the image, deletes the old cover, and updates the recipe', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
-      coverImageUrl: 'recipes/recipe-uuid/cover/old.jpg',
+      coverImageUrl: '/recipes/recipe-uuid/cover/old.jpg',
     } as never);
-    vi.mocked(storeImage).mockResolvedValue('recipes/recipe-uuid/cover/new.jpg');
+    vi.mocked(storeImage).mockResolvedValue('/recipes/recipe-uuid/cover/new.jpg');
     vi.mocked(prisma.recipe.update).mockResolvedValue({
       ...mockRecipeFull,
-      coverImageUrl: 'recipes/recipe-uuid/cover/new.jpg',
+      coverImageUrl: '/recipes/recipe-uuid/cover/new.jpg',
     } as never);
 
     const buffer = Buffer.from('fake-image-bytes');
     const result = await uploadCoverImage('recipe-uuid', buffer);
 
     expect(storeImage).toHaveBeenCalledWith(buffer, 'recipes/recipe-uuid/cover');
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/cover/old.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/cover/old.jpg');
     expect(prisma.recipe.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'recipe-uuid' },
-        data: { coverImageUrl: 'recipes/recipe-uuid/cover/new.jpg' },
+        data: { coverImageUrl: '/recipes/recipe-uuid/cover/new.jpg' },
       }),
     );
-    expect(result.coverImageUrl).toBe('https://cdn.example.com/recipes/recipe-uuid/cover/new.jpg');
+    expect(result.coverImageUrl).toBe('/recipes/recipe-uuid/cover/new.jpg');
     expect(updateIndexedRecipe).toHaveBeenCalled();
   });
 
   it('does not attempt to delete a previous cover when there was none', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
-    vi.mocked(storeImage).mockResolvedValue('recipes/recipe-uuid/cover/new.jpg');
+    vi.mocked(storeImage).mockResolvedValue('/recipes/recipe-uuid/cover/new.jpg');
     vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
 
     await uploadCoverImage('recipe-uuid', Buffer.from('x'));
@@ -480,13 +478,13 @@ describe('deleteCoverImage()', () => {
   it('clears the cover and deletes the R2 object', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
-      coverImageUrl: 'recipes/recipe-uuid/cover/old.jpg',
+      coverImageUrl: '/recipes/recipe-uuid/cover/old.jpg',
     } as never);
     vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
 
     await deleteCoverImage('recipe-uuid');
 
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/cover/old.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/cover/old.jpg');
     expect(prisma.recipe.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { coverImageUrl: null } }),
     );
@@ -508,22 +506,22 @@ describe('addGalleryImages()', () => {
   it('appends stored keys to the existing gallery', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
-      imageUrls: ['recipes/recipe-uuid/gallery/a.jpg'],
+      imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg'],
     } as never);
-    vi.mocked(storeImage).mockResolvedValueOnce('recipes/recipe-uuid/gallery/b.jpg');
+    vi.mocked(storeImage).mockResolvedValueOnce('/recipes/recipe-uuid/gallery/b.jpg');
     vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
 
     await addGalleryImages('recipe-uuid', [Buffer.from('x')]);
 
     expect(prisma.recipe.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { imageUrls: ['recipes/recipe-uuid/gallery/a.jpg', 'recipes/recipe-uuid/gallery/b.jpg'] },
+        data: { imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg', '/recipes/recipe-uuid/gallery/b.jpg'] },
       }),
     );
   });
 
   it('rejects when the gallery would exceed 10 images', async () => {
-    const existingKeys = Array.from({ length: 9 }, (_, i) => `recipes/recipe-uuid/gallery/${i}.jpg`);
+    const existingKeys = Array.from({ length: 9 }, (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: existingKeys,
@@ -538,12 +536,12 @@ describe('addGalleryImages()', () => {
   });
 
   it('allows exactly reaching the 10-image cap', async () => {
-    const existingKeys = Array.from({ length: 9 }, (_, i) => `recipes/recipe-uuid/gallery/${i}.jpg`);
+    const existingKeys = Array.from({ length: 9 }, (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: existingKeys,
     } as never);
-    vi.mocked(storeImage).mockResolvedValue('recipes/recipe-uuid/gallery/new.jpg');
+    vi.mocked(storeImage).mockResolvedValue('/recipes/recipe-uuid/gallery/new.jpg');
     vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
 
     await addGalleryImages('recipe-uuid', [Buffer.from('x')]);
@@ -568,21 +566,21 @@ describe('removeGalleryImages()', () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: [
-        'recipes/recipe-uuid/gallery/a.jpg',
-        'recipes/recipe-uuid/gallery/b.jpg',
-        'recipes/recipe-uuid/gallery/c.jpg',
+        '/recipes/recipe-uuid/gallery/a.jpg',
+        '/recipes/recipe-uuid/gallery/b.jpg',
+        '/recipes/recipe-uuid/gallery/c.jpg',
       ],
     } as never);
     vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
 
-    await removeGalleryImages('recipe-uuid', ['recipes/recipe-uuid/gallery/b.jpg']);
+    await removeGalleryImages('recipe-uuid', ['/recipes/recipe-uuid/gallery/b.jpg']);
 
-    expect(deleteImage).toHaveBeenCalledWith('recipes/recipe-uuid/gallery/b.jpg');
-    expect(deleteImage).not.toHaveBeenCalledWith('recipes/recipe-uuid/gallery/a.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/b.jpg');
+    expect(deleteImage).not.toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/a.jpg');
     expect(prisma.recipe.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: {
-          imageUrls: ['recipes/recipe-uuid/gallery/a.jpg', 'recipes/recipe-uuid/gallery/c.jpg'],
+          imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg', '/recipes/recipe-uuid/gallery/c.jpg'],
         },
       }),
     );

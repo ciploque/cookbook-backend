@@ -312,6 +312,24 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/users/username/{username}',
+  tags: ['Users'],
+  summary: 'Get public user profile by username',
+  description: 'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route.',
+  request: {
+    params: z.object({ username: z.string() }),
+  },
+  responses: {
+    200: {
+      description: 'Public user profile',
+      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: PublicUserSchema }) } },
+    },
+    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+  },
+});
+
 // ── Recipes ───────────────────────────────────────────────────────────────────
 
 registry.registerPath({

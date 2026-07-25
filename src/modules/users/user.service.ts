@@ -61,6 +61,13 @@ export async function getUserById(id: string): Promise<Omit<User, 'authProviderI
   return publicUser;
 }
 
+export async function getUserByUsername(username: string): Promise<Omit<User, 'authProviderId'>> {
+  const user = await prisma.user.findUnique({ where: { username } });
+  if (!user) throw ApiError.notFound('User');
+  const { authProviderId: _, ...publicUser } = user;
+  return publicUser;
+}
+
 export interface ClerkWebhookUserData {
   id: string;
   username: string | null;
