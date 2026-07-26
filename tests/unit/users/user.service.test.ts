@@ -87,9 +87,30 @@ describe('provisionUser()', () => {
 
   it('throws CONFLICT (409) when username is already taken', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
-    vi.mocked(prisma.user.create).mockRejectedValue(p2002);
+    vi.mocked(prisma.user.create).mockRejectedValue(p2002OnUsername);
 
     await expect(provisionUser('user_new', { username: 'taken', displayName: 'New' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+  });
+
+  it('returns the winning row when a create races on authProviderId (concurrent first login)', async () => {
+    vi.mocked(prisma.user.findUnique)
+      .mockResolvedValueOnce(null) // initial check-then-create sees no row
+      .mockResolvedValueOnce(mockUser); // re-fetch after losing the race
+    vi.mocked(prisma.user.create).mockRejectedValue(p2002OnAuthProviderId);
+
+    const result = await provisionUser('user_abc', { username: 'joao', displayName: 'João' });
+
+    expect(result).toEqual({ user: mockUser, created: false });
+  });
+
+  it('throws CONFLICT when the authProviderId race re-fetch unexpectedly finds nothing', async () => {
+    vi.mocked(prisma.user.findUnique)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+    vi.mocked(prisma.user.create).mockRejectedValue(p2002OnAuthProviderId);
+
+    await expect(provisionUser('user_abc', { username: 'joao', displayName: 'João' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 

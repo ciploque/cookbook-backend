@@ -10,7 +10,7 @@ export function authorize(
       return;
     }
 
-    const ownerId = await getResourceOwnerId(req).catch(() => null);
+    const ownerId = await getResourceOwnerId(req);
 
     if (ownerId === null) {
       next(ApiError.notFound('Resource'));

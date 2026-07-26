@@ -10,10 +10,14 @@ import {
   UpdateCollectionInput,
 } from './collection.schema';
 
+// Collection detail shows only the first 50 recipes — see CLAUDE.md Collections section.
+const MAX_INLINE_COLLECTION_RECIPES = 50;
+
 const collectionInclude = {
   owner: { select: { id: true, username: true, displayName: true, avatarUrl: true, authProviderId: true } },
   recipes: {
     orderBy: { order: 'asc' as const },
+    take: MAX_INLINE_COLLECTION_RECIPES,
     include: {
       recipe: { select: { id: true, slug: true, title: true, coverImageUrl: true } },
     },
@@ -147,8 +151,9 @@ export async function addRecipesToCollection(collectionId: string, input: AddRec
     where: { id: collectionId },
     include: collectionInclude,
   });
+  if (!collection) throw ApiError.notFound('Collection');
 
-  return formatCollection(collection!);
+  return formatCollection(collection);
 }
 
 export async function removeRecipesFromCollection(collectionId: string, recipeIds: string[]) {
@@ -163,8 +168,9 @@ export async function removeRecipesFromCollection(collectionId: string, recipeId
     where: { id: collectionId },
     include: collectionInclude,
   });
+  if (!collection) throw ApiError.notFound('Collection');
 
-  return formatCollection(collection!);
+  return formatCollection(collection);
 }
 
 export async function followCollection(collectionId: string, authProviderId: string) {

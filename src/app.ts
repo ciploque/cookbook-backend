@@ -18,6 +18,7 @@ import { asyncHandler } from './utils/asyncHandler';
 
 export function createApp(): express.Application {
   const app = express();
+  app.set('trust proxy', 1); // trust the first proxy hop (nginx / Cloudflare / ELB) so req.ip is the real client IP
 
   app.use(helmet());
   const corsOptions: cors.CorsOptions = {
@@ -55,6 +56,15 @@ export function createApp(): express.Application {
     legacyHeaders: false,
   });
 
+  // More generous than writeLimiter — covers public read endpoints that fan out to
+  // Meilisearch or issue multiple DB queries, which were previously unlimited.
+  const readLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   app.get(
     '/health',
     asyncHandler(async (_req, res) => {
@@ -64,10 +74,10 @@ export function createApp(): express.Application {
   );
 
   app.use(`${base}/v1/users`, writeLimiter, userRouter);
-  app.use(`${base}/v1/users`, userRecipesRouter); // GET reads, no write limiter
-  app.use(`${base}/v1/users`, userCollectionsRouter);
-  app.use(`${base}/v1/recipes`, recipeRouter);
-  app.use(`${base}/v1/recipes`, recipeReviewsRouter);
+  app.use(`${base}/v1/users`, readLimiter, userRecipesRouter);
+  app.use(`${base}/v1/users`, readLimiter, userCollectionsRouter);
+  app.use(`${base}/v1/recipes`, readLimiter, recipeRouter);
+  app.use(`${base}/v1/recipes`, readLimiter, recipeReviewsRouter);
   app.use(`${base}/v1/reviews`, writeLimiter, reviewRouter);
   app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
 

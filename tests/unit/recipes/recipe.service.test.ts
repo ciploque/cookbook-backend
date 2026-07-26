@@ -39,6 +39,7 @@ vi.mock('../../../src/modules/storage/storage.service', () => ({
   deleteImage: vi.fn(),
 }));
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../../src/config/database';
 import {
   deleteIndexedRecipe,
@@ -251,6 +252,40 @@ describe('createRecipe()', () => {
     expect(created[0]).toMatchObject({ name: 'Flour', order: 0 });
     expect(created[1]).toMatchObject({ name: 'Eggs', order: 1 });
   });
+
+  it('throws CONFLICT (409) when the [authorId, slug] unique constraint is violated', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(prisma.recipe.create).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['authorId', 'slug'] },
+      }),
+    );
+
+    await expect(
+      createRecipe('user_author', {
+        title: 'Pasta Carbonara', description: 'desc',
+        tags: [], ingredients: [], steps: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+
+    expect(indexRecipe).not.toHaveBeenCalled();
+  });
+
+  it('re-throws unexpected errors from prisma.recipe.create', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(prisma.recipe.create).mockRejectedValue(new Error('DB connection lost'));
+
+    await expect(
+      createRecipe('user_author', {
+        title: 'Test', description: 'desc',
+        tags: [], ingredients: [], steps: [],
+      }),
+    ).rejects.toThrow('DB connection lost');
+  });
 });
 
 // ─── deleteRecipe ─────────────────────────────────────────────────────────────
@@ -376,6 +411,16 @@ describe('listRecipes()', () => {
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
     expect(whereArg).toHaveProperty('AND');
+  });
+
+  it('filters by category with a plain equality match (not mode: insensitive)', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', category: 'pasta' });
+
+    const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
+    expect(whereArg).toMatchObject({ category: 'pasta' });
   });
 
   it('filters by minRating when provided', async () => {

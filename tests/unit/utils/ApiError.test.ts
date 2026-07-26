@@ -57,6 +57,11 @@ describe('ApiError', () => {
       const err = ApiError.notFound('User profile');
       expect(err.code).toBe('USER_PROFILE_NOT_FOUND');
     });
+
+    it('replaces every space in a 3+ word resource name, not just the first', () => {
+      const err = ApiError.notFound('Review author profile');
+      expect(err.code).toBe('REVIEW_AUTHOR_PROFILE_NOT_FOUND');
+    });
   });
 
   describe('conflict()', () => {

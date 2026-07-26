@@ -19,7 +19,7 @@ export class ApiError extends Error {
   }
 
   static notFound(resource: string): ApiError {
-    return new ApiError(404, `${resource} not found`, `${resource.toUpperCase().replace(' ', '_')}_NOT_FOUND`);
+    return new ApiError(404, `${resource} not found`, `${resource.toUpperCase().replace(/ /g, '_')}_NOT_FOUND`);
   }
 
   static conflict(message: string): ApiError {

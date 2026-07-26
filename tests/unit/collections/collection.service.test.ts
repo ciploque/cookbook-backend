@@ -285,6 +285,13 @@ describe('addRecipesToCollection()', () => {
       expect.objectContaining({ skipDuplicates: true }),
     );
     expect(result).toHaveProperty('id', 'collection-uuid');
+    expect(prisma.collection.findUnique).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          recipes: expect.objectContaining({ take: 50 }),
+        }),
+      }),
+    );
   });
 
   it('throws COLLECTION_NOT_FOUND when collection does not exist', async () => {
@@ -292,6 +299,17 @@ describe('addRecipesToCollection()', () => {
 
     await expect(
       addRecipesToCollection('missing-id', { recipes: [{ recipeId: 'recipe-uuid', order: 0 }] }),
+    ).rejects.toMatchObject({ statusCode: 404, code: 'COLLECTION_NOT_FOUND' });
+  });
+
+  it('throws COLLECTION_NOT_FOUND if the collection was deleted between mutation and re-fetch', async () => {
+    vi.mocked(prisma.collection.findUnique)
+      .mockResolvedValueOnce(mockCollectionFull as never) // initial existence check
+      .mockResolvedValueOnce(null); // deleted concurrently before the re-fetch
+    vi.mocked(prisma.collectionRecipe.createMany).mockResolvedValue({ count: 1 });
+
+    await expect(
+      addRecipesToCollection('collection-uuid', { recipes: [{ recipeId: 'recipe-uuid', order: 0 }] }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'COLLECTION_NOT_FOUND' });
   });
 });
@@ -310,6 +328,17 @@ describe('removeRecipesFromCollection()', () => {
     expect(prisma.collectionRecipe.deleteMany).toHaveBeenCalledWith({
       where: { collectionId: 'collection-uuid', recipeId: { in: ['recipe-uuid'] } },
     });
+  });
+
+  it('throws COLLECTION_NOT_FOUND if the collection was deleted between mutation and re-fetch', async () => {
+    vi.mocked(prisma.collection.findUnique)
+      .mockResolvedValueOnce(mockCollectionFull as never)
+      .mockResolvedValueOnce(null);
+    vi.mocked(prisma.collectionRecipe.deleteMany).mockResolvedValue({ count: 1 });
+
+    await expect(
+      removeRecipesFromCollection('collection-uuid', ['recipe-uuid']),
+    ).rejects.toMatchObject({ statusCode: 404, code: 'COLLECTION_NOT_FOUND' });
   });
 });
 

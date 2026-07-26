@@ -5,9 +5,16 @@ export interface PaginationQuery {
   limit: number;
 }
 
+// query values come in as `unknown` (Express can parse `?page[x]=1` into a nested object) —
+// only ever String()-convert values already known to be string|number, never a bare object.
+function parseIntOrDefault(value: unknown, fallback: number): number {
+  if (typeof value !== 'string' && typeof value !== 'number') return fallback;
+  return parseInt(String(value), 10) || fallback;
+}
+
 export function parsePaginationQuery(query: Record<string, unknown>): PaginationQuery {
-  const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1);
-  const rawLimit = parseInt(String(query.limit ?? '20'), 10) || 20;
+  const page = Math.max(1, parseIntOrDefault(query.page, 1));
+  const rawLimit = parseIntOrDefault(query.limit, 20);
   const limit = Math.min(50, Math.max(1, rawLimit));
   return { page, limit };
 }

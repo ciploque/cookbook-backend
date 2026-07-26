@@ -10,7 +10,7 @@ vi.mock('@clerk/express', () => ({
 }));
 
 import { getAuth } from '@clerk/express';
-import { authenticate } from '../../../src/middlewares/authenticate';
+import { authenticate, optionalAuthenticate } from '../../../src/middlewares/authenticate';
 
 function makeReq(overrides: Partial<Request> = {}): Request {
   return {
@@ -105,5 +105,55 @@ describe('Clerk authentication', () => {
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 401 }));
     expect(req.user).toBeUndefined();
+  });
+});
+
+// ─── optionalAuthenticate ──────────────────────────────────────────────────────
+
+describe('optionalAuthenticate()', () => {
+  it('sets req.user from x-dev-user-sub header and calls next() (dev bypass)', () => {
+    const req = makeReq({ headers: { 'x-dev-user-sub': 'user-123' } });
+    const next = vi.fn() as unknown as NextFunction;
+
+    optionalAuthenticate(req, res, next);
+
+    expect(req.user).toEqual({ sub: 'user-123' });
+    expect(next).toHaveBeenCalledWith();
+    expect(getAuth).not.toHaveBeenCalled();
+  });
+
+  it('sets req.user when a valid session is present', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: 'user_abc123' } as never);
+    const req = makeReq({ headers: { authorization: 'Bearer valid.token.here' } });
+    const next = vi.fn() as unknown as NextFunction;
+
+    optionalAuthenticate(req, res, next);
+
+    expect(req.user).toEqual({ sub: 'user_abc123' });
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('calls next() without setting req.user or an error when there is no session', () => {
+    vi.mocked(getAuth).mockReturnValue({ userId: null } as never);
+    const req = makeReq({ headers: {} });
+    const next = vi.fn() as unknown as NextFunction;
+
+    optionalAuthenticate(req, res, next);
+
+    expect(req.user).toBeUndefined();
+    expect(next).toHaveBeenCalledWith();
+  });
+
+  it('calls next() without rejecting when getAuth throws on a malformed token', () => {
+    vi.mocked(getAuth).mockImplementation(() => {
+      throw new SyntaxError('Unexpected end of data');
+    });
+    const req = makeReq({ headers: { authorization: 'Bearer garbage.token.here' } });
+    const next = vi.fn() as unknown as NextFunction;
+
+    optionalAuthenticate(req, res, next);
+
+    expect(req.user).toBeUndefined();
+    expect(next).toHaveBeenCalledWith();
   });
 });

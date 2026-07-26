@@ -18,11 +18,12 @@ export const addRecipesSchema = z.object({
         order: z.number().int().min(0),
       }),
     )
-    .min(1),
+    .min(1)
+    .max(100),
 });
 
 export const removeRecipesSchema = z.object({
-  recipeIds: z.array(z.string().uuid()).min(1),
+  recipeIds: z.array(z.string().uuid()).min(1).max(100),
 });
 
 export const collectionQuerySchema = z.object({

@@ -11,16 +11,23 @@ const server = app.listen(env.PORT, () => {
   setupMeilisearch().catch((err) => console.error('[meilisearch] setup failed:', err));
 });
 
-async function shutdown(signal: string): Promise<void> {
+// server.close() doesn't await its callback, so the disconnect promise is handled explicitly
+// here (.then/.catch) rather than via an async callback, which close() would silently not wait on.
+function shutdown(signal: string): void {
   console.log(`${signal} received — shutting down gracefully`);
-  server.close(async () => {
-    await prisma.$disconnect();
-    process.exit(0);
+  server.close(() => {
+    prisma
+      .$disconnect()
+      .then(() => process.exit(0))
+      .catch((err: unknown) => {
+        console.error('Error disconnecting Prisma during shutdown:', err);
+        process.exit(1);
+      });
   });
 }
 
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);

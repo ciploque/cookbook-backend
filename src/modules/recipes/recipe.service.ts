@@ -89,7 +89,7 @@ export async function listRecipes(query: RecipeQuery) {
   const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
 
   const where: Prisma.RecipeWhereInput = {
-    ...(category && { category: { equals: category, mode: 'insensitive' } }),
+    ...(category && { category }),
     ...(authorId && { authorId }),
     ...(minRating !== undefined && { averageRating: { gte: minRating } }),
     ...(tagSlugs.length > 0 && {
@@ -149,30 +149,38 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
   const slug = generateRecipeSlug(input.title);
   const tags = await upsertTags(input.tags);
 
-  const recipe = await prisma.recipe.create({
-    data: {
-      slug,
-      title: input.title,
-      description: input.description,
-      category: input.category,
-      coverImageUrl: null,
-      imageUrls: [],
-      prepTimeMinutes: input.prepTimeMinutes,
-      servings: input.servings,
-      difficulty: input.difficulty,
-      authorId: author.id,
-      ingredients: {
-        create: input.ingredients.map((ing, i) => ({ ...ing, order: i })),
+  let recipe;
+  try {
+    recipe = await prisma.recipe.create({
+      data: {
+        slug,
+        title: input.title,
+        description: input.description,
+        category: input.category,
+        coverImageUrl: null,
+        imageUrls: [],
+        prepTimeMinutes: input.prepTimeMinutes,
+        servings: input.servings,
+        difficulty: input.difficulty,
+        authorId: author.id,
+        ingredients: {
+          create: input.ingredients.map((ing, i) => ({ ...ing, order: i })),
+        },
+        steps: {
+          create: input.steps,
+        },
+        recipeTags: {
+          create: tags.map((t) => ({ tagId: t.id })),
+        },
       },
-      steps: {
-        create: input.steps,
-      },
-      recipeTags: {
-        create: tags.map((t) => ({ tagId: t.id })),
-      },
-    },
-    include: recipeFullInclude,
-  });
+      include: recipeFullInclude,
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      throw ApiError.conflict('You already have a recipe with this title');
+    }
+    throw e;
+  }
 
   const formatted = formatRecipeFull(recipe);
   void indexRecipe(toSearchDocument(formatted));

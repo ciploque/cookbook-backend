@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate } from '../../middlewares/authenticate';
+import { authenticate, optionalAuthenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -31,8 +31,9 @@ const ownerGuard = authorize((req) =>
   getOwnerId(req.params.collectionId as string),
 );
 
-// Public
-router.get('/:collectionId', asyncHandler(getCollectionById));
+// Public — optionalAuthenticate populates req.user (if a valid session is present) so the
+// owner can see their own private collection; it never rejects an unauthenticated request.
+router.get('/:collectionId', optionalAuthenticate, asyncHandler(getCollectionById));
 
 // Metadata CRUD
 router.post('/', authenticate, validate(createCollectionSchema, 'body'), asyncHandler(createCollection));
@@ -53,6 +54,7 @@ router.delete('/:collectionId/follow', authenticate, asyncHandler(unfollowCollec
 export const userCollectionsRouter = Router();
 userCollectionsRouter.get(
   '/:userId/collections',
+  optionalAuthenticate,
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listCollectionsByUser),
 );

@@ -1,5 +1,5 @@
 import { meiliClient, RECIPES_INDEX } from '../../config/meilisearch';
-import { buildMeta, toSkip } from '../../utils/pagination';
+import { buildMeta } from '../../utils/pagination';
 import { RecipeQuery } from './recipe.schema';
 
 export interface RecipeSearchDocument {
@@ -20,36 +20,43 @@ export interface RecipeSearchDocument {
   createdAt: string;
 }
 
-export async function indexRecipe(doc: RecipeSearchDocument): Promise<void> {
+// These are fire-and-forget: the returned promise chain is intentionally not awaited or
+// returned, so the function itself never needs to be async — callers use `void indexRecipe(...)`
+// and never observe completion.
+export function indexRecipe(doc: RecipeSearchDocument): void {
   meiliClient
     .index(RECIPES_INDEX)
     .addDocuments([doc])
     .catch((err: unknown) => console.error('[meilisearch] indexRecipe failed:', err));
 }
 
-export async function updateIndexedRecipe(doc: RecipeSearchDocument): Promise<void> {
+export function updateIndexedRecipe(doc: RecipeSearchDocument): void {
   meiliClient
     .index(RECIPES_INDEX)
     .updateDocuments([doc])
     .catch((err: unknown) => console.error('[meilisearch] updateIndexedRecipe failed:', err));
 }
 
-export async function updateIndexedRecipeRating(
+export function updateIndexedRecipeRating(
   recipeId: string,
   averageRating: number | null,
   reviewCount: number,
-): Promise<void> {
+): void {
   meiliClient
     .index(RECIPES_INDEX)
     .updateDocuments([{ id: recipeId, averageRating, reviewCount }])
     .catch((err: unknown) => console.error('[meilisearch] updateIndexedRecipeRating failed:', err));
 }
 
-export async function deleteIndexedRecipe(recipeId: string): Promise<void> {
+export function deleteIndexedRecipe(recipeId: string): void {
   meiliClient
     .index(RECIPES_INDEX)
     .deleteDocument(recipeId)
     .catch((err: unknown) => console.error('[meilisearch] deleteIndexedRecipe failed:', err));
+}
+
+function escapeMeiliString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 export async function searchRecipesViaMeili(query: RecipeQuery) {
@@ -58,23 +65,28 @@ export async function searchRecipesViaMeili(query: RecipeQuery) {
   const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
 
   const filter: string[] = [];
-  if (category) filter.push(`category = "${category}"`);
-  if (authorId) filter.push(`authorId = "${authorId}"`);
+  if (category) filter.push(`category = "${escapeMeiliString(category)}"`);
+  if (authorId) filter.push(`authorId = "${escapeMeiliString(authorId)}"`);
   if (minRating !== undefined) filter.push(`averageRating >= ${minRating}`);
-  tagSlugs.forEach((slug) => filter.push(`tags = "${slug}"`));
+  tagSlugs.forEach((slug) => filter.push(`tags = "${escapeMeiliString(slug)}"`));
 
-  const result = await meiliClient.index(RECIPES_INDEX).search<RecipeSearchDocument>(q, {
+  // Page-based pagination (page/hitsPerPage) makes Meilisearch compute an exact totalHits,
+  // unlike offset/limit which only ever returns an estimatedTotalHits.
+  const searchParams = {
     filter: filter.length > 0 ? filter : undefined,
     sort: [`${sortBy}:${order}`],
-    offset: toSkip(page, limit),
-    limit,
-  });
+    page,
+    hitsPerPage: limit,
+  };
+  const result = await meiliClient
+    .index(RECIPES_INDEX)
+    .search<RecipeSearchDocument, typeof searchParams>(q, searchParams);
 
   return {
-    data: result.hits.map((hit: any) => ({
+    data: result.hits.map((hit) => ({
       ...hit,
       description: (hit.description ?? '').slice(0, 200),
     })),
-    meta: buildMeta(page, limit, result.estimatedTotalHits ?? 0),
+    meta: buildMeta(page, limit, result.totalHits ?? 0),
   };
 }

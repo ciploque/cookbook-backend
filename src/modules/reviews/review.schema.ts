@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { trustedImageUrlSchema } from '../../utils/imageUrl';
 
 export const createReviewSchema = z.object({
   recipeId: z.string().uuid(),
   rating: z.number().int().min(1).max(5),
   content: z.string().max(2000).optional(),
-  imageUrls: z.array(z.string().url()).optional().default([]),
+  imageUrls: z.array(trustedImageUrlSchema).max(10).optional().default([]),
 });
 
 export const reviewQuerySchema = z.object({

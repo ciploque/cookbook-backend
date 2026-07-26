@@ -1,734 +1,269 @@
-# Open Issues — cookbook-backend
+# Issues — cookbook-backend
 
-Findings from the 2026-06-26 code review. Each entry contains the exact location,
-the problematic code, why it is wrong, and a complete description of what the fix
-must do so an AI agent can implement it without additional context.
-
----
-
-## ISSUE-01 · Meilisearch Filter Injection
-
-**Severity:** High  
-**Category:** Security  
-**File:** `src/modules/recipes/recipe.search.ts` lines 48–50
-
-### Problematic code
-
-```ts
-if (category) filter.push(`category = "${category}"`);
-if (authorId) filter.push(`authorId = "${authorId}"`);
-tagSlugs.forEach((slug) => filter.push(`tags = "${slug}"`));
-```
-
-### Why it is wrong
-
-`category` arrives as a raw `z.string()` query param with no character restrictions.
-A crafted value such as `cooking" OR authorId != "00000000` breaks out of the filter
-string and changes Meilisearch query semantics. `authorId` is safe because it is
-`z.string().uuid()`, but `category` and each individual tag slug are not sanitised.
-This is direct injection into Meilisearch's filter DSL.
-
-### What the fix must do
-
-1. Add a helper function `escapeMeiliString(value: string): string` that replaces
-   every `"` and `\` with their escaped versions (`\"` and `\\`) before embedding
-   the value in the filter string. Example:
-
-   ```ts
-   function escapeMeiliString(value: string): string {
-     return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-   }
-   ```
-
-2. Apply the helper to every string that is interpolated into a filter expression:
-
-   ```ts
-   if (category) filter.push(`category = "${escapeMeiliString(category)}"`);
-   tagSlugs.forEach((slug) => filter.push(`tags = "${escapeMeiliString(slug)}"`));
-   ```
-
-3. `authorId` is already UUID-validated and does not need escaping, but wrapping it
-   is harmless and keeps the code consistent.
-
-4. No schema changes are required; the fix is local to `searchRecipesViaMeili`.
+Findings from the 2026-06-26 code review. All findings below were re-verified against
+the current codebase and resolved on 2026-07-25, except ISSUE-03 which was made moot
+by the Keycloak → Clerk migration. See `CLAUDE.md` for the current, authoritative
+documentation of the behaviors described here (Rate Limiting section, env var table,
+Recipes/Reviews/Collections API reference, Meilisearch Integration section).
 
 ---
 
-## ISSUE-02 · TRUSTED_IMAGE_DOMAINS Never Enforced
+## ISSUE-01 · Meilisearch Filter Injection — ✅ Resolved
 
-**Severity:** High  
-**Category:** Security / Validation  
-**Files:**
-- `src/config/env.ts` lines 36–38 (exports `trustedImageDomains` — never imported elsewhere)
-- `src/modules/recipes/recipe.schema.ts` lines 24–25 (image URL fields)
-- `src/modules/reviews/review.schema.ts` line 7 (review image URLs)
+**File:** `src/modules/recipes/recipe.search.ts`
 
-### Problematic code
-
-`env.ts`:
-```ts
-export const trustedImageDomains = env.TRUSTED_IMAGE_DOMAINS
-  ? env.TRUSTED_IMAGE_DOMAINS.split(',').map((s) => s.trim())
-  : [];
-```
-
-`recipe.schema.ts`:
-```ts
-coverImageUrl: z.string().url().optional(),
-imageUrls: z.array(z.string().url()).default([]),
-```
-
-`review.schema.ts`:
-```ts
-imageUrls: z.array(z.string().url()).optional().default([]),
-```
-
-### Why it is wrong
-
-`trustedImageDomains` is computed and exported but never imported or referenced
-anywhere in the codebase. Image URLs are accepted from any hostname as long as they
-are syntactically valid URLs. The domain allowlist feature documented in CLAUDE.md
-and `.env.example` is entirely dead.
-
-### What the fix must do
-
-1. Create a Zod refinement helper in a new file `src/utils/imageUrl.ts`:
-
-   ```ts
-   import { z } from 'zod';
-   import { trustedImageDomains } from '../config/env';
-
-   function isTrustedUrl(url: string): boolean {
-     if (trustedImageDomains.length === 0) return true; // no allowlist configured → allow all
-     try {
-       const hostname = new URL(url).hostname;
-       return trustedImageDomains.includes(hostname);
-     } catch {
-       return false;
-     }
-   }
-
-   export const trustedImageUrlSchema = z
-     .string()
-     .url()
-     .refine(isTrustedUrl, { message: 'Image URL hostname is not in the trusted domain list' });
-   ```
-
-2. Replace every `z.string().url()` that represents an image field in the schemas:
-   - `src/modules/recipes/recipe.schema.ts`: `coverImageUrl`, `imageUrls` items,
-     and `stepSchema.imageUrl`
-   - `src/modules/reviews/review.schema.ts`: `imageUrls` items
-
-3. Do NOT apply the trusted-domain check to `avatarUrl` on users unless that is also
-   an intended constraint (the env var name says "IMAGE_DOMAINS" and the CLAUDE.md
-   scopes it to `coverImageUrl` and `imageUrls` fields only).
-
-4. No service or controller changes are needed; the fix is entirely in the schemas
-   and the new utility module.
+`category`, `authorId`, and tag slugs are now passed through `escapeMeiliString()`
+(escapes `\` and `"`) before being interpolated into the Meilisearch filter DSL.
+Covered by new tests in `tests/unit/recipes/recipe.search.test.ts`.
 
 ---
 
-## ISSUE-03 · JWT Audience Validation Not Enforced
+## ISSUE-02 · TRUSTED_IMAGE_DOMAINS Never Enforced — ✅ Resolved
 
-**Severity:** High  
-**Category:** Security  
-**File:** `src/middlewares/authenticate.ts` lines 45–47  
-**Related file:** `src/config/env.ts` line 12
+**Files:** `src/utils/imageUrl.ts` (new), `src/modules/recipes/recipe.schema.ts`,
+`src/modules/reviews/review.schema.ts`
 
-### Problematic code
-
-```ts
-// env.ts
-KEYCLOAK_AUDIENCE: z.string().optional(),
-
-// authenticate.ts
-if (env.KEYCLOAK_AUDIENCE) {
-  options.audience = env.KEYCLOAK_AUDIENCE;
-}
-```
-
-### Why it is wrong
-
-When `KEYCLOAK_AUDIENCE` is unset, `jsonwebtoken` performs no `aud` claim check.
-Any RS256-signed JWT from the same Keycloak realm — regardless of which client it
-was issued for — will authenticate successfully. A token intended for the Keycloak
-admin console or another application in the same realm becomes a valid credential
-for this API.
-
-### What the fix must do
-
-1. Change `KEYCLOAK_AUDIENCE` in `src/config/env.ts` from `optional()` to
-   `z.string().min(1)` so the server refuses to start if the audience is not
-   configured:
-
-   ```ts
-   KEYCLOAK_AUDIENCE: z.string().min(1),
-   ```
-
-2. Remove the conditional guard in `authenticate.ts` and always set the audience:
-
-   ```ts
-   const options: jwt.VerifyOptions = {
-     issuer: keycloakIssuer,
-     algorithms: ['RS256'],
-     audience: env.KEYCLOAK_AUDIENCE,
-   };
-   ```
-
-3. Update `.env.example` to remove the "(optional but recommended)" comment and
-   mark the field as required.
-
-4. Update `CLAUDE.md` env var table: change the `KEYCLOAK_AUDIENCE` row to
-   `Required: yes`.
-
-5. Update the authenticate middleware unit test mock in
-   `tests/unit/middlewares/authenticate.test.ts` to always include
-   `KEYCLOAK_AUDIENCE` in the mocked env object (it already does — verify it still
-   passes after step 1).
+Added `trustedImageUrlSchema` (a Zod refinement checking the URL hostname against
+`trustedImageDomains`, allowing everything when the allowlist is empty). Applied to
+`RecipeStep.imageUrl` and `Review.imageUrls` — the two raw-URL image fields that
+remain in the API (`Recipe.coverImageUrl`/`imageUrls` are server-managed via the R2
+upload endpoints and were never affected). `User.avatarUrl` intentionally left
+unrestricted, per the original issue's scope note. Covered by
+`tests/unit/utils/imageUrl.test.ts`.
 
 ---
 
-## ISSUE-04 · Rate Limiter Ineffective Without `trust proxy`
+## ISSUE-03 · JWT Audience Validation Not Enforced — ⬜ Obsolete
 
-**Severity:** Medium  
-**Category:** Security  
-**File:** `src/app.ts` lines 32–37
-
-### Problematic code
-
-```ts
-const writeLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-```
-
-`app.set('trust proxy', ...)` is never called anywhere.
-
-### Why it is wrong
-
-`express-rate-limit` uses `req.ip` to identify clients. Without `trust proxy`, Express
-reads the IP from the TCP socket, which behind nginx / Cloudflare / an ELB is always
-the proxy's IP. Every user shares a single rate limit bucket. The limiter is completely
-ineffective for per-client throttling and can falsely throttle all users at once.
-
-### What the fix must do
-
-1. Add `app.set('trust proxy', 1)` near the top of `createApp()` in `src/app.ts`,
-   before any middleware is registered. The value `1` means "trust one hop" (the
-   first proxy), which is correct for a single reverse proxy. If the deployment uses
-   multiple proxy hops (e.g., Cloudflare in front of nginx), this should be `2`.
-   Use `1` as the default and document it in `.env.example` or CLAUDE.md.
-
-   ```ts
-   export function createApp(): express.Application {
-     const app = express();
-     app.set('trust proxy', 1); // trust the first proxy (nginx / Cloudflare / ELB)
-     app.use(helmet());
-     // ...
-   ```
-
-2. No other changes are required. `express-rate-limit` will automatically read the
-   real client IP from `X-Forwarded-For` once trust proxy is enabled.
+This finding was specific to the old Keycloak/`jsonwebtoken` auth stack
+(`KEYCLOAK_AUDIENCE`, manual `jwt.verify` options). The project has since migrated to
+`@clerk/express` (`getAuth()` in `src/middlewares/authenticate.ts`), which handles
+token/session verification internally. No equivalent gap was found in the current
+auth flow — see CLAUDE.md's Authentication Flow section.
 
 ---
 
-## ISSUE-05 · No Rate Limiting on Public Read Endpoints
+## ISSUE-04 · Rate Limiter Ineffective Without `trust proxy` — ✅ Resolved
 
-**Severity:** Medium  
-**Category:** Security / Scalability  
-**File:** `src/app.ts` lines 49–56
+**File:** `src/app.ts`
 
-### Problematic code
-
-```ts
-app.use(`${base}/v1/users`, writeLimiter, userRouter);
-app.use(`${base}/v1/recipes`, recipeRouter);       // ← no limiter
-app.use(`${base}/v1/reviews`, writeLimiter, reviewRouter);
-app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
-
-app.get(`${base}/v1/recipes/:recipeId/reviews`, ...);             // ← no limiter
-app.get(`${base}/v1/users/:username/recipes/:recipename`, ...);   // ← no limiter
-app.get(`${base}/v1/users/:userId/recipes`, ...);                 // ← no limiter
-app.get(`${base}/v1/users/:userId/collections`, ...);             // ← no limiter
-```
-
-### Why it is wrong
-
-`GET /recipes` fans out to Meilisearch on every call and touches the DB for non-search
-paths. The user-scoped list routes each perform two DB queries. These endpoints can be
-hammered indefinitely with no back-pressure, enabling resource exhaustion on both
-Postgres and Meilisearch.
-
-### What the fix must do
-
-1. Add a separate `readLimiter` in `createApp()` with a more generous limit than the
-   write limiter (e.g., 300 requests per 15 minutes):
-
-   ```ts
-   const readLimiter = rateLimit({
-     windowMs: 15 * 60 * 1000,
-     max: 300,
-     standardHeaders: true,
-     legacyHeaders: false,
-   });
-   ```
-
-2. Apply `readLimiter` to the recipe router and to every individual GET route that is
-   registered directly on `app`:
-
-   ```ts
-   app.use(`${base}/v1/recipes`, readLimiter, recipeRouter);
-
-   app.get(`${base}/v1/recipes/:recipeId/reviews`, readLimiter, ...);
-   app.get(`${base}/v1/users/:username/recipes/:recipename`, readLimiter, ...);
-   app.get(`${base}/v1/users/:userId/recipes`, readLimiter, ...);
-   app.get(`${base}/v1/users/:userId/collections`, readLimiter, ...);
-   ```
-
-3. The `health` endpoint should remain exempt (monitoring systems probe it frequently).
+Added `app.set('trust proxy', 1)` at the top of `createApp()`, before any middleware.
 
 ---
 
-## ISSUE-06 · Array Fields Have No Maximum Length
+## ISSUE-05 · No Rate Limiting on Public Read Endpoints — ✅ Resolved
 
-**Severity:** Medium  
-**Category:** Validation  
-**Files:**
-- `src/modules/recipes/recipe.schema.ts` lines 20–27
-- `src/modules/collections/collection.schema.ts` lines 13–26
-- `src/modules/reviews/review.schema.ts` line 7
+**File:** `src/app.ts`
 
-### Problematic code
-
-```ts
-// recipe.schema.ts
-tags: z.array(z.string().min(1)).default([]),         // no .max()
-imageUrls: z.array(z.string().url()).default([]),      // no .max()
-ingredients: z.array(ingredientSchema).default([]),   // no .max()
-steps: z.array(stepSchema).default([]),               // no .max()
-
-// collection.schema.ts
-recipes: z.array(...).min(1),    // no .max()
-recipeIds: z.array(...).min(1),  // no .max()
-
-// review.schema.ts
-imageUrls: z.array(z.string().url()).optional().default([]),  // no .max()
-```
-
-### Why it is wrong
-
-A single malicious or buggy request with 10,000 ingredients, 5,000 steps, or 10,000
-recipe IDs will be accepted, then executed inside a Prisma transaction. This creates
-unbounded DB write pressure and can lock rows or exhaust connection pool time.
-
-### What the fix must do
-
-Add `.max(N)` constraints to all array fields. Suggested limits (adjust based on
-product requirements):
-
-| Field | Suggested max |
-|---|---|
-| `tags` (recipe) | 20 |
-| `imageUrls` (recipe) | 20 |
-| `ingredients` | 200 |
-| `steps` | 100 |
-| `addRecipesSchema.recipes` | 100 |
-| `removeRecipesSchema.recipeIds` | 100 |
-| `imageUrls` (review) | 10 |
-
-Apply the `.max()` in the Zod array definition, for example:
-
-```ts
-ingredients: z.array(ingredientSchema).max(200).default([]),
-steps: z.array(stepSchema).max(100).default([]),
-tags: z.array(z.string().min(1)).max(20).default([]),
-imageUrls: z.array(z.string().url()).max(20).default([]),
-```
-
-Also add individual string length limits where missing:
-- `ingredientSchema.name`: add `.max(200)`
-- `ingredientSchema.unit`: add `.max(50)`
-- `ingredientSchema.notes`: add `.max(500)`
-- `stepSchema.instruction`: add `.max(2000)`
-- `recipeQuerySchema.category`: add `.max(100)`
-- `recipeQuerySchema.tags` (the comma-separated string): add `.max(500)`
+Added a `readLimiter` (300 req / 15 min) applied to the recipe router and the
+cross-module GET routes (`recipeReviewsRouter`, `userRecipesRouter`,
+`userCollectionsRouter`). See CLAUDE.md's Rate Limiting section for the full
+limiter/route matrix.
 
 ---
 
-## ISSUE-07 · Unbounded Collection Recipe Fetch
+## ISSUE-06 · Array Fields Have No Maximum Length — ✅ Resolved
 
-**Severity:** High  
-**Category:** Scalability  
-**File:** `src/modules/collections/collection.service.ts` lines 13–22
+**Files:** `src/modules/recipes/recipe.schema.ts`, `src/modules/collections/collection.schema.ts`,
+`src/modules/reviews/review.schema.ts`
 
-### Problematic code
-
-```ts
-const collectionInclude = {
-  owner: { select: { ... } },
-  recipes: {
-    orderBy: { order: 'asc' as const },
-    include: {
-      recipe: { select: { id: true, slug: true, title: true, coverImageUrl: true } },
-    },
-    // ← no `take` limit
-  },
-  _count: { select: { followers: true } },
-} satisfies Prisma.CollectionInclude;
-```
-
-### Why it is wrong
-
-Every call to `getCollectionById` or `listCollectionsByUser` loads ALL recipes in
-every collection. A collection with 1,000 saved recipes returns all 1,000 inline on
-every request. The list endpoint compounds this across every collection returned.
-
-### What the fix must do
-
-**Option A — Paginated recipes sub-resource (preferred):**
-
-1. Remove `recipes` from `collectionInclude` and create a separate
-   `collectionSummaryInclude` (owner + follower count only, no recipes).
-
-2. Add a new service function `listRecipesByCollection(collectionId, query)` that
-   paginates `CollectionRecipe` with `take`/`skip` and returns the standard paginated
-   response shape.
-
-3. Add a new route `GET /collections/:collectionId/recipes` that calls this service.
-
-4. `getCollectionById` returns collection metadata + paginated first page of recipes
-   (or metadata only, with recipes fetched separately).
-
-**Option B — Hard cap (quick fix):**
-
-Add `take: 50` to the `recipes` include and document that collection detail only
-shows the first 50 recipes. This is a minimum viable change while Option A is
-implemented:
-
-```ts
-recipes: {
-  orderBy: { order: 'asc' as const },
-  take: 50,
-  include: {
-    recipe: { select: { id: true, slug: true, title: true, coverImageUrl: true } },
-  },
-},
-```
-
-The CLAUDE.md API reference and OpenAPI docs must be updated to reflect whichever
-approach is chosen.
+Added `.max()` to `tags` (20), `ingredients` (200), `steps` (100), gallery `paths` (10),
+`addRecipesSchema.recipes` (100), `removeRecipesSchema.recipeIds` (100), and review
+`imageUrls` (10). Added string length caps to `ingredientSchema.name/unit/notes`,
+`stepSchema.instruction`, and `recipeQuerySchema.category/tags`.
 
 ---
 
-## ISSUE-08 · N+1 Queries in `upsertTags`
+## ISSUE-07 · Unbounded Collection Recipe Fetch — ✅ Resolved (quick-fix option)
 
-**Severity:** Medium  
-**Category:** Performance  
-**File:** `src/modules/tags/tag.service.ts` lines 8–13
+**File:** `src/modules/collections/collection.service.ts`
 
-### Problematic code
-
-```ts
-const tags = await Promise.all(
-  tagNames.map((name) => {
-    const slug = slugify(name);
-    return prisma.tag.upsert({
-      where: { slug },
-      update: {},
-      create: { name: name.toLowerCase(), slug },
-    });
-  }),
-);
-```
-
-### Why it is wrong
-
-Each tag is a separate database round-trip. With 15 tags and high write concurrency,
-this creates 15 × N concurrent upserts. Concurrent upserts on the same unique slug
-can also trigger Prisma P2002 errors that are not caught here.
-
-### What the fix must do
-
-Replace the parallel upsert loop with a batch approach:
-
-1. Compute all slugs and de-duplicate them before hitting the DB.
-
-2. Use `createMany` with `skipDuplicates: true` to insert any new tags in a single
-   statement.
-
-3. Fetch all relevant tags with a single `findMany`:
-
-```ts
-export async function upsertTags(tagNames: string[]): Promise<Tag[]> {
-  if (tagNames.length === 0) return [];
-
-  const entries = tagNames.map((name) => ({
-    name: name.toLowerCase(),
-    slug: slugify(name),
-  }));
-
-  const uniqueSlugs = [...new Set(entries.map((e) => e.slug))];
-  const uniqueEntries = uniqueSlugs.map(
-    (slug) => entries.find((e) => e.slug === slug)!,
-  );
-
-  await prisma.tag.createMany({
-    data: uniqueEntries,
-    skipDuplicates: true,
-  });
-
-  return prisma.tag.findMany({
-    where: { slug: { in: uniqueSlugs } },
-  });
-}
-```
-
-This reduces the operation from N round-trips to exactly 2, regardless of how many
-tags are submitted.
+Applied the documented "Option B" quick fix: `take: 50` added to the `recipes`
+include in `collectionInclude`. A paginated `GET /collections/:collectionId/recipes`
+sub-resource (Option A) is still open as a follow-up if collections regularly exceed
+50 saved recipes.
 
 ---
 
-## ISSUE-09 · Race Condition in `provisionUser`
+## ISSUE-08 · N+1 Queries in `upsertTags` — ✅ Resolved
 
-**Severity:** Medium  
-**Category:** Correctness  
-**File:** `src/modules/users/user.service.ts` lines 10–25
+**File:** `src/modules/tags/tag.service.ts`
 
-### Problematic code
-
-```ts
-const existing = await prisma.user.findUnique({ where: { keycloakId } });
-if (existing) {
-  return { user: existing, created: false };
-}
-
-try {
-  const user = await prisma.user.create({ ... });
-  return { user, created: true };
-} catch (e) {
-  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-    throw ApiError.conflict('Username already taken');  // ← wrong error for keycloakId race
-  }
-  throw e;
-}
-```
-
-### Why it is wrong
-
-The check-then-create is not atomic. Two concurrent first-login requests for the same
-Keycloak sub can both pass `findUnique` (both see no existing row), then both attempt
-`create`. The second one hits the unique constraint on `keycloakId` and throws P2002,
-which is caught and re-thrown as `ApiError.conflict('Username already taken')` — the
-wrong message. The frontend receives a confusing 409 instead of the expected idempotent
-200.
-
-### What the fix must do
-
-Distinguish between which unique constraint fired by inspecting `err.meta.target`:
-
-```ts
-} catch (e) {
-  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-    const target = (e.meta?.target as string[] | undefined) ?? [];
-    if (target.includes('keycloakId')) {
-      // Race on first login — another request already created the row; return it.
-      const existing = await prisma.user.findUnique({ where: { keycloakId } });
-      if (existing) return { user: existing, created: false };
-    }
-    throw ApiError.conflict('Username already taken');
-  }
-  throw e;
-}
-```
-
-This makes the provision endpoint correctly idempotent under concurrent first-login
-requests.
+Replaced the parallel `upsert` loop with a single `createMany({ skipDuplicates: true })`
+followed by one `findMany`. Covered by the new `tests/unit/tags/tag.service.test.ts`.
 
 ---
 
-## ISSUE-10 · Non-null Assertion After Re-fetch in Collection Service
+## ISSUE-09 · Race Condition in `provisionUser` — ✅ Resolved
 
-**Severity:** Low  
-**Category:** Correctness  
-**File:** `src/modules/collections/collection.service.ts` lines 146–152 and 161–167
+**File:** `src/modules/users/user.service.ts`
 
-### Problematic code
-
-```ts
-// addRecipesToCollection
-const collection = await prisma.collection.findUnique({
-  where: { id: collectionId },
-  include: collectionInclude,
-});
-return formatCollection(collection!);  // ← crashes if deleted between mutation and re-fetch
-
-// removeRecipesFromCollection
-const collection = await prisma.collection.findUnique({ ... });
-return formatCollection(collection!);  // ← same issue
-```
-
-### Why it is wrong
-
-If the collection is deleted concurrently between the `createMany`/`deleteMany` and
-the final re-fetch, `findUnique` returns `null`. The non-null assertion `!` bypasses
-TypeScript's null check and causes a runtime `TypeError: Cannot read properties of
-null` which propagates as an unhandled 500 instead of a proper `ApiError.notFound`.
-
-### What the fix must do
-
-Add a null guard after both re-fetches in `addRecipesToCollection` and
-`removeRecipesFromCollection`:
-
-```ts
-const collection = await prisma.collection.findUnique({
-  where: { id: collectionId },
-  include: collectionInclude,
-});
-if (!collection) throw ApiError.notFound('Collection');
-return formatCollection(collection);
-```
-
-Remove both `!` assertions. No other changes needed.
+`provisionUser` now inspects `e.meta.target` on `P2002` the same way
+`provisionFromWebhook` already did: if the race was on `authProviderId`, it re-fetches
+and returns the winning row instead of throwing a misleading "Username already taken".
 
 ---
 
-## ISSUE-11 · `Math.random()` Slug Collision Not Handled in `createRecipe`
+## ISSUE-10 · Non-null Assertion After Re-fetch in Collection Service — ✅ Resolved
 
-**Severity:** Low  
-**Category:** Correctness / Reliability  
-**Files:**
-- `src/utils/slugify.ts` line 14
-- `src/modules/recipes/recipe.service.ts` lines 137–172
+**File:** `src/modules/collections/collection.service.ts`
 
-### Problematic code
-
-```ts
-// slugify.ts
-const suffix = Math.random().toString(36).slice(2, 6);
-
-// recipe.service.ts — createRecipe has no P2002 handler
-const recipe = await prisma.recipe.create({ data: { slug, ... } });
-```
-
-### Why it is wrong
-
-`Math.random()` with 4 base-36 characters gives 1,679,616 possible suffixes. For a
-prolific author with many similarly-titled recipes, collisions on `@@unique([authorId,
-slug])` are realistic. When one occurs, Prisma throws P2002, which is not caught in
-`createRecipe` — it bubbles up as a raw 500 error.
-
-Additionally, `Math.random()` is not a cryptographically secure RNG. For a suffix
-whose only purpose is collision avoidance (not security), using `crypto.randomBytes`
-is more robust.
-
-### What the fix must do
-
-1. Change `generateRecipeSlug` in `src/utils/slugify.ts` to use Node's `crypto`:
-
-   ```ts
-   import { randomBytes } from 'crypto';
-
-   export function generateRecipeSlug(title: string): string {
-     const base = slugify(title);
-     const suffix = randomBytes(3).toString('hex'); // 6 hex chars, 16M possibilities
-     return base ? `${base}-${suffix}` : suffix;
-   }
-   ```
-
-   The `base ?` guard also fixes the edge case where a non-latin title produces an
-   empty base (see note below).
-
-2. Wrap the `prisma.recipe.create` call in `createRecipe` with a retry on P2002
-   targeting the `[authorId, slug]` constraint:
-
-   ```ts
-   for (let attempt = 0; attempt < 3; attempt++) {
-     const slug = generateRecipeSlug(input.title);
-     try {
-       const recipe = await prisma.recipe.create({ data: { slug, ... } });
-       // ...
-       return formatted;
-     } catch (e) {
-       if (
-         e instanceof Prisma.PrismaClientKnownRequestError &&
-         e.code === 'P2002' &&
-         (e.meta?.target as string[] | undefined)?.includes('slug')
-       ) {
-         if (attempt === 2) throw ApiError.internal('Could not generate a unique slug');
-         continue;
-       }
-       throw e;
-     }
-   }
-   ```
+Removed the `formatCollection(collection!)` assertions in `addRecipesToCollection` and
+`removeRecipesFromCollection`; both now throw `ApiError.notFound('Collection')` if the
+re-fetch returns `null`.
 
 ---
 
-## ISSUE-12 · `estimatedTotalHits` Used for Pagination Math
+## ISSUE-11 · Recipe Slug Collision Not Handled in `createRecipe` — ✅ Resolved
 
-**Severity:** Low  
-**Category:** Correctness  
-**File:** `src/modules/recipes/recipe.search.ts` line 64
+**Files:** `src/utils/slugify.ts`, `src/modules/recipes/recipe.service.ts`
 
-### Problematic code
-
-```ts
-meta: buildMeta(page, limit, result.estimatedTotalHits ?? 0),
-```
-
-### Why it is wrong
-
-Meilisearch returns `estimatedTotalHits` as an approximation for performance, not an
-exact count. Using it to compute `totalPages` and `hasNextPage` in `buildMeta` can
-yield incorrect pagination metadata: users may navigate to a page number that appears
-valid but returns 0 results, or the true last page is unreachable.
-
-### What the fix must do
-
-Configure the search call to request an exact total hit count by passing
-`hitsPerPage` and `page` (Meilisearch pagination mode) instead of `offset`/`limit`,
-OR by enabling `matchingStrategy` + requesting `totalHits`. The simplest fix is to
-request `totalHits` by passing `{ limit }` to make Meilisearch compute the exact
-count when the result set is small:
-
-```ts
-const result = await meiliClient.index(RECIPES_INDEX).search<RecipeSearchDocument>(q, {
-  filter: filter.length > 0 ? filter : undefined,
-  sort: [`${sortBy}:${order}`],
-  offset: toSkip(page, limit),
-  limit,
-  // Request exact total for accurate pagination:
-  hitsPerPage: limit,
-  page,
-});
-
-return {
-  data: result.hits.map((hit) => ({
-    ...hit,
-    description: (hit.description ?? '').slice(0, 200),
-  })),
-  meta: buildMeta(page, limit, result.totalHits ?? result.estimatedTotalHits ?? 0),
-};
-```
-
-Also remove the `(hit: any)` cast on line 60 — `result.hits` is already typed as
-`RecipeSearchDocument[]` from the generic parameter, so the `any` is unnecessary
-and silently disables type checking on that map callback.
+By the time this was re-verified, `generateRecipeSlug` no longer added a random
+suffix at all (slug = slugified title, immutable, unique per author — see CLAUDE.md's
+Schema decisions note). The remaining real gap was that `createRecipe` had no handler
+for the `P2002` this produces on a duplicate title for the same author. `createRecipe`
+now catches it and throws `ApiError.conflict(...)`, matching the documented
+`409 CONFLICT` behavior. Covered by a new test in `tests/unit/recipes/recipe.service.test.ts`.
 
 ---
 
-## Cross-cutting notes for the fixing agent
+## ISSUE-12 · `estimatedTotalHits` Used for Pagination Math — ✅ Resolved
 
-- All schema changes require regenerating the OpenAPI spec if it is generated from
-  Zod schemas via `@asteasolutions/zod-to-openapi`. Run `npm run build` and verify
-  the OpenAPI test (`tests/unit/docs/openapi.test.ts`) still passes after changes.
-- Slug generation changes must update the corresponding unit tests in
-  `tests/unit/utils/slugify.test.ts`.
-- `upsertTags` changes must update `tests/unit/recipes/recipe.service.test.ts` —
-  the mock for `tag.service` may need adjustment.
-- ISSUE-03 (audience) changes must update the env mock in
-  `tests/unit/middlewares/authenticate.test.ts` to always include `KEYCLOAK_AUDIENCE`.
-- Run `npm test` after each fix to ensure existing 119 tests continue to pass.
+**File:** `src/modules/recipes/recipe.search.ts`
+
+Switched `searchRecipesViaMeili` from `offset`/`limit` to Meilisearch's page-based
+pagination (`page`/`hitsPerPage`), which returns an exact `totalHits` instead of an
+estimate. Also removed the `(hit: any)` cast on the hits map. Covered by updated tests
+in `tests/unit/recipes/recipe.search.test.ts`.
+
+---
+
+# Findings from the 2026-07-25 architecture/security/performance scan
+
+A second, broader pass across every controller, service, middleware, and config file —
+not limited to the original 2026-06-26 review's scope. Resolved the same day, except
+ISSUE-16 which is a deliberately-deferred, documented risk (not a bug).
+
+## ISSUE-13 · `GET /recipes/:recipeId` Required Auth for a Public Route — ✅ Resolved
+
+**Severity:** High
+**File:** `src/modules/recipes/recipe.router.ts`
+
+`router.get('/:recipeId', authenticate, ...)` required a valid session to view a single
+recipe, even though `getRecipeById` does no ownership/privacy check at all and CLAUDE.md
+documents this route as `Public`. Every logged-out visitor got `401 UNAUTHORIZED` trying
+to view a recipe — the most basic read path in the API. Looked like a copy-paste from
+the owner-gated routes below it. Fix: dropped `authenticate` from that line.
+
+## ISSUE-14 · Collection Owners Could Never See Their Own Private Collections — ✅ Resolved
+
+**Severity:** High
+**Files:** `src/middlewares/authenticate.ts` (new `optionalAuthenticate`),
+`src/modules/collections/collection.router.ts`
+
+`GET /collections/:collectionId` and `GET /users/:userId/collections` never ran
+`authenticate` (correct — they're public-by-default routes), but their controllers
+passed `req.user?.sub` to the service as the "requesting user" for the private-collection
+visibility check. `req.user` is *only* ever populated inside `authenticate.ts` — nothing
+else sets it — so on these two routes it was always `undefined`, even with a fully valid
+session. Owners got `404` on their own private collections, and private collections
+silently vanished from their own `GET /users/:userId/collections` list.
+
+Fix: added `optionalAuthenticate` (resolves `getAuth(req)` the same way `authenticate`
+does, but never rejects — populates `req.user` when a valid session is present and just
+calls `next()` otherwise) and wired it into both routes. See CLAUDE.md's
+[Optional Auth](#optional-auth-optionalauthenticate) section.
+
+## ISSUE-15 · `category` Filter Couldn't Use Its Own Index — ✅ Resolved
+
+**Severity:** Medium
+**Files:** `src/modules/recipes/recipe.schema.ts`, `src/modules/recipes/recipe.service.ts`
+
+`{ category: { equals: category, mode: 'insensitive' } }` against `@@index([category])`
+(a plain B-tree index, default case-sensitive collation) — Prisma's `mode: 'insensitive'`
+compiles to a case-insensitive comparison that a plain B-tree index structurally cannot
+satisfy, forcing a sequential scan on every `?category=` request as the `recipes` table
+grows. This was also inconsistent with the Meilisearch path, which did an exact
+case-sensitive filter match — different casing behavior depending on whether `q` was
+present.
+
+Fix: normalize `category` to lowercase/trim at the Zod layer, on both write
+(`createRecipeSchema`) and the query filter (`recipeQuerySchema`), and switch the Postgres
+filter to a plain equality match. Unifies casing behavior between the Postgres and
+Meilisearch paths as a side effect. Ran a one-time `UPDATE recipes SET category =
+LOWER(TRIM(category)) WHERE category IS NOT NULL` against the dev DB (a no-op — existing
+data was already lowercase); run the same statement against any other environment with
+existing recipe data before deploying this change.
+
+## ISSUE-16 · CORS Wildcard + `credentials: true` — ⚠️ Open, deliberately deferred
+
+**Severity:** Medium
+**File:** `src/app.ts`
+
+When `ALLOWED_ORIGINS=*`, the code deliberately reflects the request's `Origin` header
+(required for `credentials: true` to work at all — browsers reject a literal `"*"` when
+credentials are present). Combined with Clerk's documented cookie-based session support
+(not just Bearer tokens — see CLAUDE.md's Authentication Flow), this means: if an
+operator sets `ALLOWED_ORIGINS=*` *and* the deployment topology puts Clerk's session
+cookie in scope for this API's domain, any origin could make a credentialed request and
+read the response. This is an opt-in footgun (requires the operator to set the wildcard),
+not a default-on vulnerability, and the exploitability depends on deployment topology
+(whether the Clerk cookie is actually in scope for this API's domain).
+
+**Not fixed yet — deliberately deferred.** Revisit before recommending `ALLOWED_ORIGINS=*`
+for any deployment that also relies on Clerk's cookie-based session path. Options when
+picked back up: drop `credentials: true` when reflecting a wildcard origin, or emit a
+startup warning when `ALLOWED_ORIGINS=*` is set, or require an explicit opt-in flag
+separate from the origin list itself.
+
+## ISSUE-17 · `authorize.ts` Swallowed All Errors Into a Blanket 404 — ✅ Resolved
+
+**Severity:** Low
+**File:** `src/middlewares/authorize.ts`
+
+```ts
+const ownerId = await getResourceOwnerId(req).catch(() => null);
+```
+
+A genuine DB failure during the ownership lookup (connection drop, timeout) was
+indistinguishable from "resource doesn't exist" — every owner-gated route (recipes,
+collections) returned `404` instead of `500` when the database itself was unhealthy.
+Good for not leaking info, bad for debugging: an outage looked like every resource had
+vanished, not like an infra problem.
+
+Fix: removed the `.catch(() => null)`. `getResourceOwnerId` implementations
+(`getRecipeAuthorId`, `getOwnerId`) already resolve `null` for a genuine "not found"
+without throwing — an unexpected error now propagates through the (already-async)
+middleware to `asyncHandler` at the router level, which forwards it to the global error
+handler as `500 INTERNAL_ERROR`. Covered by a new `tests/unit/middlewares/authorize.test.ts`.
+
+## ISSUE-18 · `ApiError.notFound()` Only Replaced the First Space — ✅ Resolved
+
+**Severity:** Low
+**File:** `src/utils/ApiError.ts`
+
+```ts
+`${resource.toUpperCase().replace(' ', '_')}_NOT_FOUND`
+```
+
+Missing the `/g` flag — only the *first* space in a multi-word resource name got
+replaced. Dormant today because every call site passes a single word (`'Recipe'`,
+`'User'`, `'Collection'`) or a two-word name (exactly one space, so the bug was
+invisible). The moment anyone calls `ApiError.notFound('Review Author Profile')`
+(3 words, 2 spaces), it would silently produce `REVIEW_AUTHOR PROFILE_NOT_FOUND` — a
+literal space in a machine-readable `code` field, breaking the documented
+`{RESOURCE}_NOT_FOUND` contract. One-character fix (`/ /g`). Added a 3-word test case to
+`tests/unit/utils/ApiError.test.ts` alongside the existing 2-word one.
+
+## ISSUE-19 · Tag Filter Had No Cap on Subquery Count — ✅ Resolved
+
+**Severity:** Low
+**File:** `src/modules/recipes/recipe.schema.ts`
+
+`tags` was capped at 500 characters but not by item count — a dense comma list of short
+slugs could chain up to ~60-80 ANDed correlated `EXISTS` subqueries (one per tag) into a
+single query. Not urgent, but avoidable. Fix: added a `.refine()` on
+`recipeQuerySchema.tags` rejecting more than 20 comma-separated values (matching the
+existing 20-tag cap on `createRecipeSchema.tags` — a recipe can never have more than 20
+tags anyway, so filtering by more couldn't match anything regardless). Covered by
+`tests/unit/recipes/recipe.schema.test.ts`.

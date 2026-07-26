@@ -20,6 +20,12 @@ export async function provisionUser(
     return { user, created: true };
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      const target = (e.meta?.target as string[] | undefined) ?? [];
+      if (target.includes('authProviderId')) {
+        // Lost a create race against a concurrent first-login request — the row exists now.
+        const race = await prisma.user.findUnique({ where: { authProviderId } });
+        if (race) return { user: race, created: false };
+      }
       throw ApiError.conflict('Username already taken');
     }
     throw e;
