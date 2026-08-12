@@ -260,7 +260,7 @@ Two ways to hit protected routes during development:
 | `user.deleted` | Deletes the `User` row (`deleteUserByAuthProviderId`) — cascades to recipes, reviews, collections, etc. per the schema's `onDelete: Cascade`. No-ops (doesn't error) if the user was never provisioned. |
 
 **Local testing** — Clerk needs a public URL to reach your machine; the `x-dev-user-sub` bypass does not apply here since signature verification requires a real Clerk-signed payload:
-- **ngrok** (or similar tunnel): `ngrok http 3001`, then register `https://<subdomain>.ngrok-free.app/api/v1/webhooks/clerk` as the endpoint URL in Dashboard → Webhooks. Copy the endpoint's signing secret into `CLERK_WEBHOOK_SIGNING_SECRET`. Use the endpoint's "Testing" tab → "Send example" to fire a payload without a real signup/delete.
+- **ngrok** (or similar tunnel): `ngrok http 3001`, then register `https://<subdomain>.ngrok-free.app/api/v1/webhooks/clerk` as the endpoint URL in Dashboard → Webhooks. Copy the endpoint's signing secret into `CLERK_WEBHOOK_SIGNING_SECRET`. Use the endpoint's "Testing" tab → "Send example" to fire a payload without a real signup/delete. `npm run dev:tunnel` (or `dev:tunnel:build` to also run the app inside Docker) automates the docker-compose-up + ngrok part of this.
 - **Svix CLI** (`npx svix-cli listen http://localhost:3001/api/v1/webhooks/clerk`) — forwards events from Clerk (which uses Svix under the hood) straight to localhost, no public tunnel needed. Paste the printed forwarding URL into the Dashboard endpoint config.
 
 ---
@@ -1126,6 +1126,8 @@ Both run via `docker/docker-compose.yml`.
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run meili:reindex` | Bulk-index all recipes from Postgres into Meilisearch |
 | `npm run clerk:token -- <userId>` | Mint a real Clerk session token for local API testing (no frontend needed) |
+| `npm run dev:tunnel` | Start `postgres`+`meilisearch` (`docker compose up -d`) then an `ngrok http 3001` tunnel — pair with `npm run dev` running locally. Requires the `ngrok` CLI |
+| `npm run dev:tunnel:build` | Same, but also builds and starts the containerized `app` service (`docker compose up -d --build`) instead of running the server locally |
 
 ---
 

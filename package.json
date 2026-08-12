@@ -19,7 +19,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "meili:reindex": "tsx prisma/reindexMeilisearch.ts",
-    "clerk:token": "tsx scripts/clerkToken.ts"
+    "clerk:token": "tsx scripts/clerkToken.ts",
+    "dev:tunnel": "bash scripts/dev-tunnel.sh",
+    "dev:tunnel:build": "bash scripts/dev-tunnel.sh --build"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^7.3.4",

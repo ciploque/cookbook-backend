@@ -26,7 +26,7 @@ export function createApp(): express.Application {
     // the string literal "*" is rejected by browsers when credentials are present).
     origin: env.ALLOWED_ORIGINS === '*' ? true : allowedOrigins,
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-dev-user-sub'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-dev-user-sub', 'ngrok-skip-browser-warning'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   };
   app.use(cors(corsOptions));
