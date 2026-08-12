@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { trustedImageUrlSchema } from '../../utils/imageUrl';
+import { trustedVideoUrlSchema } from '../../utils/videoUrl';
 
 const ingredientSchema = z.object({
   name: z.string().min(1).max(200),
@@ -17,11 +18,13 @@ const stepSchema = z.object({
 export const createRecipeSchema = z.object({
   title: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
+  authorNote: z.string().max(300).optional(),
   // Normalized to lowercase so filtering can use a plain equality match against the
   // existing `@@index([category])` — a case-insensitive Prisma filter (`mode: 'insensitive'`)
   // can't use that index and would force a sequential scan as the table grows.
   category: z.string().min(1).trim().toLowerCase().optional(),
   tags: z.array(z.string().min(1)).max(20).default([]),
+  videoUrl: trustedVideoUrlSchema.optional(),
   prepTimeMinutes: z.number().int().min(0).optional(),
   servings: z.number().int().min(1).optional(),
   difficulty: z.number().int().min(0).optional(),

@@ -5,7 +5,12 @@ import { buildMeta, toSkip } from '../../utils/pagination';
 import { generateRecipeSlug } from '../../utils/slugify';
 import { upsertTags } from '../tags/tag.service';
 import { deleteImage, storeImage } from '../storage/storage.service';
-import { CreateRecipeInput, PatchRecipeInput, RecipeQuery, UpdateRecipeInput } from './recipe.schema';
+import {
+  CreateRecipeInput,
+  PatchRecipeInput,
+  RecipeQuery,
+  UpdateRecipeInput,
+} from './recipe.schema';
 import {
   RecipeSearchDocument,
   deleteIndexedRecipe,
@@ -28,21 +33,25 @@ function formatRecipeFull(recipe: Prisma.RecipeGetPayload<{ include: typeof reci
   return { ...rest, tags: recipeTags.map((rt) => rt.tag.slug) };
 }
 
-function toSearchDocument(
-  recipe: ReturnType<typeof formatRecipeFull>,
-): RecipeSearchDocument {
+function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSearchDocument {
   return {
     id: recipe.id,
     slug: recipe.slug,
     title: recipe.title,
     description: recipe.description ?? null,
+    authorNote: recipe.authorNote ?? null,
     category: recipe.category ?? null,
     coverImageUrl: recipe.coverImageUrl,
     imageUrls: recipe.imageUrls,
+    videoUrl: recipe.videoUrl,
     prepTimeMinutes: recipe.prepTimeMinutes,
     difficulty: recipe.difficulty ?? null,
     authorId: recipe.authorId,
-    author: { id: recipe.author.id, username: recipe.author.username, displayName: recipe.author.displayName },
+    author: {
+      id: recipe.author.id,
+      username: recipe.author.username,
+      displayName: recipe.author.displayName,
+    },
     tags: recipe.tags,
     averageRating: recipe.averageRating,
     reviewCount: recipe.reviewCount,
@@ -55,9 +64,11 @@ const recipeListSelect = {
   slug: true,
   title: true,
   description: true,
+  authorNote: true,
   category: true,
   coverImageUrl: true,
   imageUrls: true,
+  videoUrl: true,
   prepTimeMinutes: true,
   difficulty: true,
   averageRating: true,
@@ -86,7 +97,12 @@ export async function listRecipes(query: RecipeQuery) {
   const { tags, category, authorId, minRating, page, limit, sortBy, order } = query;
   const skip = toSkip(page, limit);
 
-  const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
+  const tagSlugs = tags
+    ? tags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : [];
 
   const where: Prisma.RecipeWhereInput = {
     ...(category && { category }),
@@ -156,9 +172,11 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
         slug,
         title: input.title,
         description: input.description,
+        authorNote: input.authorNote,
         category: input.category,
         coverImageUrl: null,
         imageUrls: [],
+        videoUrl: input.videoUrl,
         prepTimeMinutes: input.prepTimeMinutes,
         servings: input.servings,
         difficulty: input.difficulty,
@@ -200,7 +218,9 @@ export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
       data: {
         title: input.title,
         description: input.description,
+        authorNote: input.authorNote,
         category: input.category,
+        videoUrl: input.videoUrl,
         prepTimeMinutes: input.prepTimeMinutes,
         servings: input.servings,
         difficulty: input.difficulty,
@@ -245,7 +265,9 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
       data: {
         ...(input.title !== undefined && { title: input.title }),
         ...(input.description !== undefined && { description: input.description }),
+        ...(input.authorNote !== undefined && { authorNote: input.authorNote }),
         ...(input.category !== undefined && { category: input.category }),
+        ...(input.videoUrl !== undefined && { videoUrl: input.videoUrl }),
         ...(input.prepTimeMinutes !== undefined && { prepTimeMinutes: input.prepTimeMinutes }),
         ...(input.servings !== undefined && { servings: input.servings }),
         ...(input.difficulty !== undefined && { difficulty: input.difficulty }),

@@ -7,9 +7,11 @@ export interface RecipeSearchDocument {
   slug: string;
   title: string;
   description: string | null;
+  authorNote: string | null;
   category: string | null;
   coverImageUrl: string | null;
   imageUrls: string[];
+  videoUrl: string | null;
   prepTimeMinutes: number | null;
   difficulty: number | null;
   authorId: string;
@@ -62,7 +64,12 @@ function escapeMeiliString(value: string): string {
 export async function searchRecipesViaMeili(query: RecipeQuery) {
   const { q, tags, category, authorId, minRating, page, limit, sortBy, order } = query;
 
-  const tagSlugs = tags ? tags.split(',').map((t) => t.trim()).filter(Boolean) : [];
+  const tagSlugs = tags
+    ? tags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : [];
 
   const filter: string[] = [];
   if (category) filter.push(`category = "${escapeMeiliString(category)}"`);

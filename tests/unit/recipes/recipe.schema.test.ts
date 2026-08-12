@@ -20,6 +20,42 @@ describe('createRecipeSchema — category normalization', () => {
   });
 });
 
+describe('createRecipeSchema — videoUrl', () => {
+  const base = { title: 'Test', tags: [], ingredients: [], steps: [] };
+
+  it('accepts a valid YouTube URL', () => {
+    const result = createRecipeSchema.safeParse({
+      ...base,
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a URL from a disallowed host', () => {
+    const result = createRecipeSchema.safeParse({ ...base, videoUrl: 'https://evil.com/video.mp4' });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('createRecipeSchema — authorNote', () => {
+  const base = { title: 'Test', tags: [], ingredients: [], steps: [] };
+
+  it('accepts a note within 300 chars', () => {
+    const result = createRecipeSchema.safeParse({ ...base, authorNote: 'A family favorite' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a note over 300 chars', () => {
+    const result = createRecipeSchema.safeParse({ ...base, authorNote: 'a'.repeat(301) });
+    expect(result.success).toBe(false);
+  });
+
+  it('allows omitting authorNote', () => {
+    const result = createRecipeSchema.safeParse(base);
+    expect(result.success).toBe(true);
+  });
+});
+
 describe('recipeQuerySchema — category normalization', () => {
   it('lowercases and trims the category filter the same way as write', () => {
     const result = recipeQuerySchema.parse({ category: '  Pasta  ' });

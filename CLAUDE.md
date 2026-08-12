@@ -96,6 +96,7 @@ cookbook-backend/
 │   │   ├── pagination.ts       # parsePaginationQuery, buildMeta, toSkip
 │   │   ├── imageSignature.ts    # detectImageType() — magic-byte sniffing (JPEG/PNG/WEBP/GIF), rejects SVG/unknown content
 │   │   ├── imageUrl.ts          # trustedImageUrlSchema — Zod refinement enforcing TRUSTED_IMAGE_DOMAINS on raw-URL image fields
+│   │   ├── videoUrl.ts          # trustedVideoUrlSchema — Zod refinement enforcing a fixed https-only video-platform allowlist on Recipe.videoUrl
 │   │   └── slugify.ts          # slugify() + generateRecipeSlug() → "pasta-carbonara"
 │   ├── app.ts                  # Express app factory (no listen call); mounts all routes
 │   └── server.ts               # Entry point: first import is dotenv/config; creates app; graceful shutdown
@@ -420,8 +421,10 @@ GET /api/v1/users/joao/recipes/pasta-carbonara
 {
   "title": "string (required, max 120)",
   "description": "string (optional, max 2000)",
+  "authorNote": "string (optional, max 300 — brief personal note from the author)",
   "category": "string (optional)",
   "tags": ["string (max 20 items)"],
+  "videoUrl": "string (optional — https URL from YouTube, Vimeo, TikTok, Instagram, Facebook, or Loom)",
   "prepTimeMinutes": "number (optional, min 0)",
   "servings": "number (optional, min 1)",
   "difficulty": "number (optional, min 0 — numeric rating scale)",
@@ -458,10 +461,12 @@ Slug is generated at creation from the title (no random suffix) and is **immutab
   "slug": "pasta-carbonara",
   "title": "string",
   "description": "string | null",
+  "authorNote": "string | null",
   "category": "string | null",
   "tags": ["pasta", "italian"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
+  "videoUrl": "string | null",
   "prepTimeMinutes": 15,
   "servings": 4,
   "difficulty": "number | null",
@@ -488,10 +493,12 @@ Abbreviated — no full steps or ingredients:
   "slug": "string",
   "title": "string",
   "description": "string (truncated to 200 chars)",
+  "authorNote": "string | null",
   "category": "string | null",
   "tags": ["string"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
+  "videoUrl": "string | null",
   "prepTimeMinutes": 15,
   "difficulty": "number | null",
   "averageRating": "number | null",
@@ -688,9 +695,11 @@ model Recipe {
   slug            String                // unique per author (not globally); see @@unique below
   title           String
   description     String?
+  authorNote      String?
   category        String?
   coverImageUrl   String?
   imageUrls       String[]
+  videoUrl        String?               // https URL, validated against a fixed video-platform allowlist — see Schema decisions
   prepTimeMinutes Int?
   servings        Int?
   difficulty      Int?                  // numeric rating — no fixed scale enforced by DB
@@ -839,8 +848,10 @@ model CollectionFollower {
 - `Recipe.slug` is generated once at creation (the slugified title, no suffix) and is **immutable**.
 - `Recipe.difficulty` is a plain `Int?` — the numeric scale is defined by the frontend (e.g. 1–5 stars). No DB-level constraint beyond `min 0` enforced by Zod.
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
+- `Recipe.authorNote` is a plain optional `String?` (max 300 chars, Zod-enforced) — a short personal note from the author, distinct from the longer `description`. It's included in Meilisearch documents for response-shape parity between the Postgres and Meilisearch list paths, but deliberately left out of `searchableAttributes`/`filterableAttributes`/`sortableAttributes` — it's supplementary text, not a search/filter/sort target.
 - `Recipe.imageUrls` is a PostgreSQL text array (`TEXT[]`, default `{}`). `coverImageUrl` is the primary display image; `imageUrls` is the gallery, capped at 10 entries.
 - `Recipe.coverImageUrl`/`Recipe.imageUrls` store **relative paths with a leading `/`** (e.g. `/recipes/<id>/cover/<uuid>.jpg`), not full URLs — despite the field names, kept as-is to avoid a rename migration. The API returns these paths as-is (no hydration); the frontend prepends its own base/CDN URL. `storage.service.ts#storeImage` is what produces the leading-slash form. See [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage).
+- `Recipe.videoUrl` is a raw, client-supplied `String?` (unlike `coverImageUrl`/`imageUrls`, which are server-managed paths) validated by `trustedVideoUrlSchema` (`src/utils/videoUrl.ts`) against a **fixed, hard-coded** allowlist of video-platform hostnames (YouTube, Vimeo, TikTok, Instagram, Facebook, Loom) — unlike `trustedImageUrlSchema`/`TRUSTED_IMAGE_DOMAINS`, this allowlist is not env-configurable and has no "allow all when unset" fallback; it's always enforced. Validation requires `https:` protocol explicitly and matches `URL.hostname` (WHATWG parser, not regex) by exact-or-subdomain equality, which closes the usual URL-allowlist bypasses (userinfo tricks like `https://youtube.com@evil.com/`, lookalike hosts like `evilyoutube.com`, suffix tricks like `youtube.com.evil.com`). Cloudflare R2 as a video origin is planned but **not yet implemented** — it needs a public R2 domain that doesn't exist in this deployment yet; adding it later means appending to `ALLOWED_VIDEO_HOSTS` (or introducing an env-driven R2 domain list), not restructuring the validator.
 - `RecipeIngredient.name` is a plain string (no normalized `Ingredient` table). Phase 2 scope.
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2. Both `createRecipeSchema.category` and `recipeQuerySchema.category` lowercase/trim the value at the Zod layer (`.trim().toLowerCase()`), so `listRecipes` can filter with a plain equality match against `@@index([category])`. Prisma's `mode: 'insensitive'` was deliberately avoided here — it compiles to a case-insensitive comparison (`ILIKE`/`LOWER()`-equivalent) that a plain B-tree index can't satisfy, forcing a sequential scan as the table grows. If you ever add a raw SQL path that writes `category` directly (bypassing the schema), normalize it the same way.

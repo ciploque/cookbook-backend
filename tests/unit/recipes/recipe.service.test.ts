@@ -78,9 +78,11 @@ const mockRecipeFull = {
   slug: 'pasta-carbonara-abcd',
   title: 'Pasta Carbonara',
   description: 'Classic Roman pasta dish',
+  authorNote: 'A family favorite',
   category: 'pasta',
   coverImageUrl: null,
   imageUrls: [],
+  videoUrl: null,
   prepTimeMinutes: null,
   servings: null,
   difficulty: null,
@@ -204,7 +206,9 @@ describe('createRecipe()', () => {
     const result = await createRecipe('user_author', {
       title: 'Pasta Carbonara',
       description: 'Classic Roman pasta dish',
+      authorNote: 'A family favorite',
       category: 'pasta',
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
       tags: ['italian'],
       ingredients: [{ name: 'Spaghetti', quantity: 400 }],
       steps: [{ order: 1, instruction: 'Boil pasta' }],
@@ -216,6 +220,8 @@ describe('createRecipe()', () => {
         data: expect.objectContaining({
           slug: 'pasta-carbonara-abcd',
           authorId: 'author-uuid',
+          videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          authorNote: 'A family favorite',
         }),
       }),
     );
@@ -225,6 +231,7 @@ describe('createRecipe()', () => {
         id: 'recipe-uuid',
         title: 'Pasta Carbonara',
         authorId: 'author-uuid',
+        authorNote: 'A family favorite',
         tags: ['italian'],
       }),
     );
@@ -360,6 +367,80 @@ describe('patchRecipe()', () => {
     });
 
     expect(updateIndexedRecipe).not.toHaveBeenCalled();
+  });
+
+  it('passes videoUrl through to the update data when provided', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { videoUrl: 'https://vimeo.com/12345' });
+
+    expect(updateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ videoUrl: 'https://vimeo.com/12345' }) }),
+    );
+  });
+
+  it('omits videoUrl from the update data when not provided', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { title: 'Updated Title' });
+
+    const updateData = updateMock.mock.calls[0][0].data;
+    expect(updateData).not.toHaveProperty('videoUrl');
+  });
+
+  it('passes authorNote through to the update data when provided', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { authorNote: 'Updated note' });
+
+    expect(updateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ authorNote: 'Updated note' }) }),
+    );
+  });
+
+  it('omits authorNote from the update data when not provided', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { title: 'Updated Title' });
+
+    const updateData = updateMock.mock.calls[0][0].data;
+    expect(updateData).not.toHaveProperty('authorNote');
   });
 });
 
