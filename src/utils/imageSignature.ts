@@ -1,6 +1,10 @@
 export type DetectedImageType = 'jpeg' | 'png' | 'webp' | 'gif';
 
-const SIGNATURES: { type: DetectedImageType; extension: string; matches: (buf: Buffer) => boolean }[] = [
+const SIGNATURES: {
+  type: DetectedImageType;
+  extension: string;
+  matches: (buf: Buffer) => boolean;
+}[] = [
   {
     type: 'jpeg',
     extension: 'jpg',

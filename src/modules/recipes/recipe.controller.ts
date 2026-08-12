@@ -20,10 +20,7 @@ export async function getRecipeById(req: Request, res: Response): Promise<void> 
 }
 
 export async function createRecipe(req: Request, res: Response): Promise<void> {
-  const recipe = await recipeService.createRecipe(
-    req.user!.sub,
-    req.body as CreateRecipeInput,
-  );
+  const recipe = await recipeService.createRecipe(req.user!.sub, req.body as CreateRecipeInput);
   res.status(201).json({ success: true, data: recipe });
 }
 

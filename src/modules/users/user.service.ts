@@ -15,7 +15,12 @@ export async function provisionUser(
 
   try {
     const user = await prisma.user.create({
-      data: { authProviderId, username: input.username, displayName: input.displayName, avatarUrl: input.avatarUrl },
+      data: {
+        authProviderId,
+        username: input.username,
+        displayName: input.displayName,
+        avatarUrl: input.avatarUrl,
+      },
     });
     return { user, created: true };
   } catch (e) {
@@ -147,7 +152,9 @@ export async function provisionFromWebhook(
     }
   }
 
-  throw ApiError.internal('Failed to provision user from webhook: could not generate a unique username');
+  throw ApiError.internal(
+    'Failed to provision user from webhook: could not generate a unique username',
+  );
 }
 
 export async function deleteUserByAuthProviderId(authProviderId: string): Promise<void> {

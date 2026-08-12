@@ -7,6 +7,11 @@ const router = Router();
 
 // Raw body is required for Svix/Standard Webhooks signature verification — must run before
 // the app's global express.json(), which would otherwise consume and parse the body first.
-router.post('/clerk', raw({ type: 'application/json' }), verifyClerkWebhook, asyncHandler(controller.handleClerkWebhook));
+router.post(
+  '/clerk',
+  raw({ type: 'application/json' }),
+  verifyClerkWebhook,
+  asyncHandler(controller.handleClerkWebhook),
+);
 
 export default router;

@@ -30,12 +30,7 @@ const uploadLimiter = rateLimit({
 
 router.get('/', validate(recipeQuerySchema, 'query'), asyncHandler(controller.listRecipes));
 router.get('/:recipeId', asyncHandler(controller.getRecipeById));
-router.post(
-  '/',
-  authenticate,
-  validate(createRecipeSchema),
-  asyncHandler(controller.createRecipe),
-);
+router.post('/', authenticate, validate(createRecipeSchema), asyncHandler(controller.createRecipe));
 router.put(
   '/:recipeId',
   authenticate,

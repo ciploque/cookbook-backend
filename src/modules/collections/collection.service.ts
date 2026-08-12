@@ -14,7 +14,9 @@ import {
 const MAX_INLINE_COLLECTION_RECIPES = 50;
 
 const collectionInclude = {
-  owner: { select: { id: true, username: true, displayName: true, avatarUrl: true, authProviderId: true } },
+  owner: {
+    select: { id: true, username: true, displayName: true, avatarUrl: true, authProviderId: true },
+  },
   recipes: {
     orderBy: { order: 'asc' as const },
     take: MAX_INLINE_COLLECTION_RECIPES,
@@ -28,7 +30,11 @@ const collectionInclude = {
 function formatCollection(
   collection: Prisma.CollectionGetPayload<{ include: typeof collectionInclude }>,
 ) {
-  const { _count, owner: { authProviderId: _ownerKey, ...ownerPublic }, ...rest } = collection;
+  const {
+    _count,
+    owner: { authProviderId: _ownerKey, ...ownerPublic },
+    ...rest
+  } = collection;
   return { ...rest, owner: ownerPublic, followerCount: _count.followers };
 }
 
@@ -43,7 +49,8 @@ export async function listCollectionsByUser(
   });
   if (!targetUser) throw ApiError.notFound('User');
 
-  const isOwner = !!requestingAuthProviderId && requestingAuthProviderId === targetUser.authProviderId;
+  const isOwner =
+    !!requestingAuthProviderId && requestingAuthProviderId === targetUser.authProviderId;
   const { page, limit } = query;
   const skip = toSkip(page, limit);
 
@@ -78,7 +85,8 @@ export async function getCollectionById(collectionId: string, requestingAuthProv
   if (!collection) throw ApiError.notFound('Collection');
 
   if (!collection.isPublic) {
-    const isOwner = !!requestingAuthProviderId && requestingAuthProviderId === collection.owner.authProviderId;
+    const isOwner =
+      !!requestingAuthProviderId && requestingAuthProviderId === collection.owner.authProviderId;
     if (!isOwner) throw ApiError.notFound('Collection');
   }
 

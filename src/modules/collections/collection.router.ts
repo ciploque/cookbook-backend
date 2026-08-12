@@ -27,23 +27,55 @@ import {
 
 const router = Router();
 
-const ownerGuard = authorize((req) =>
-  getOwnerId(req.params.collectionId as string),
-);
+const ownerGuard = authorize((req) => getOwnerId(req.params.collectionId as string));
 
 // Public — optionalAuthenticate populates req.user (if a valid session is present) so the
 // owner can see their own private collection; it never rejects an unauthenticated request.
 router.get('/:collectionId', optionalAuthenticate, asyncHandler(getCollectionById));
 
 // Metadata CRUD
-router.post('/', authenticate, validate(createCollectionSchema, 'body'), asyncHandler(createCollection));
-router.put('/:collectionId', authenticate, asyncHandler(ownerGuard), validate(updateCollectionSchema, 'body'), asyncHandler(updateCollection));
-router.patch('/:collectionId', authenticate, asyncHandler(ownerGuard), validate(patchCollectionSchema, 'body'), asyncHandler(patchCollection));
-router.delete('/:collectionId', authenticate, asyncHandler(ownerGuard), asyncHandler(deleteCollection));
+router.post(
+  '/',
+  authenticate,
+  validate(createCollectionSchema, 'body'),
+  asyncHandler(createCollection),
+);
+router.put(
+  '/:collectionId',
+  authenticate,
+  asyncHandler(ownerGuard),
+  validate(updateCollectionSchema, 'body'),
+  asyncHandler(updateCollection),
+);
+router.patch(
+  '/:collectionId',
+  authenticate,
+  asyncHandler(ownerGuard),
+  validate(patchCollectionSchema, 'body'),
+  asyncHandler(patchCollection),
+);
+router.delete(
+  '/:collectionId',
+  authenticate,
+  asyncHandler(ownerGuard),
+  asyncHandler(deleteCollection),
+);
 
 // Recipe management
-router.post('/:collectionId/recipes', authenticate, asyncHandler(ownerGuard), validate(addRecipesSchema, 'body'), asyncHandler(addRecipesToCollection));
-router.delete('/:collectionId/recipes', authenticate, asyncHandler(ownerGuard), validate(removeRecipesSchema, 'body'), asyncHandler(removeRecipesFromCollection));
+router.post(
+  '/:collectionId/recipes',
+  authenticate,
+  asyncHandler(ownerGuard),
+  validate(addRecipesSchema, 'body'),
+  asyncHandler(addRecipesToCollection),
+);
+router.delete(
+  '/:collectionId/recipes',
+  authenticate,
+  asyncHandler(ownerGuard),
+  validate(removeRecipesSchema, 'body'),
+  asyncHandler(removeRecipesFromCollection),
+);
 
 // Follow / unfollow
 router.post('/:collectionId/follow', authenticate, asyncHandler(followCollection));

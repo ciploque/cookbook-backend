@@ -82,7 +82,11 @@ export function createApp(): express.Application {
   app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
 
   if (env.NODE_ENV !== 'production') {
-    const removeCSP = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const removeCSP = (
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
       res.removeHeader('Content-Security-Policy'); // helmet's CSP blocks swagger UI inline scripts
       next();
     };
@@ -95,7 +99,7 @@ export function createApp(): express.Application {
 
     app.use(
       '/api-docs',
-      cors(),    // allow any origin — docs are public
+      cors(), // allow any origin — docs are public
       removeCSP,
       swaggerUi.serve,
       swaggerUi.setup(undefined, { swaggerOptions: { url: '/api-docs.json' } }),

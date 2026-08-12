@@ -1,6 +1,13 @@
 import { Request, Response } from 'express';
 import * as collectionService from './collection.service';
-import { AddRecipesInput, CollectionQuery, CreateCollectionInput, PatchCollectionInput, RemoveRecipesInput, UpdateCollectionInput } from './collection.schema';
+import {
+  AddRecipesInput,
+  CollectionQuery,
+  CreateCollectionInput,
+  PatchCollectionInput,
+  RemoveRecipesInput,
+  UpdateCollectionInput,
+} from './collection.schema';
 
 export async function listCollectionsByUser(req: Request, res: Response): Promise<void> {
   const result = await collectionService.listCollectionsByUser(

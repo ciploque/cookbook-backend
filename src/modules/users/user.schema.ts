@@ -4,7 +4,10 @@ const usernameField = z
   .string()
   .min(3)
   .max(30)
-  .regex(/^[a-z0-9_-]+$/, 'Username may only contain lowercase letters, numbers, hyphens and underscores');
+  .regex(
+    /^[a-z0-9_-]+$/,
+    'Username may only contain lowercase letters, numbers, hyphens and underscores',
+  );
 
 export const provisionUserSchema = z.object({
   username: usernameField,

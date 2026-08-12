@@ -6,8 +6,15 @@ export async function handleClerkWebhook(req: Request, res: Response): Promise<v
 
   switch (event.type) {
     case 'user.created': {
-      const { id, username, first_name, last_name, image_url, email_addresses, primary_email_address_id } =
-        event.data;
+      const {
+        id,
+        username,
+        first_name,
+        last_name,
+        image_url,
+        email_addresses,
+        primary_email_address_id,
+      } = event.data;
       const primaryEmail =
         email_addresses.find((e) => e.id === primary_email_address_id)?.email_address ??
         email_addresses[0]?.email_address ??
