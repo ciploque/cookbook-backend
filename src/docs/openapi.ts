@@ -80,10 +80,12 @@ const RecipeDetailSchema = registry.register(
     slug: z.string(),
     title: z.string(),
     description: z.string().nullable(),
+    authorNote: z.string().nullable(),
     category: z.string().nullable(),
     tags: z.array(z.string()),
     coverImageUrl: z.string().nullable(),
     imageUrls: z.array(z.string()),
+    videoUrl: z.string().nullable(),
     prepTimeMinutes: z.number().int().nullable(),
     servings: z.number().int().nullable(),
     difficulty: z.number().int().nullable(),
@@ -104,10 +106,12 @@ const RecipeListItemSchema = registry.register(
     slug: z.string(),
     title: z.string(),
     description: z.string(),
+    authorNote: z.string().nullable(),
     category: z.string().nullable(),
     tags: z.array(z.string()),
     coverImageUrl: z.string().nullable(),
     imageUrls: z.array(z.string()),
+    videoUrl: z.string().nullable(),
     prepTimeMinutes: z.number().int().nullable(),
     difficulty: z.number().int().nullable(),
     averageRating: z.number().nullable(),
@@ -161,10 +165,28 @@ const ReviewSchema = registry.register(
 const CreateRecipeBody = registry.register('CreateRecipeBody', createRecipeSchema);
 const UpdateRecipeBody = registry.register('UpdateRecipeBody', updateRecipeSchema);
 const PatchRecipeBody = registry.register('PatchRecipeBody', patchRecipeSchema);
-const RemoveGalleryImagesBody = registry.register('RemoveGalleryImagesBody', removeGalleryImagesSchema);
+const RemoveGalleryImagesBody = registry.register(
+  'RemoveGalleryImagesBody',
+  removeGalleryImagesSchema,
+);
 const ProvisionUserBody = registry.register('ProvisionUserBody', provisionUserSchema);
 const UpdateUserBody = registry.register('UpdateUserBody', updateUserSchema);
 const CreateReviewBody = registry.register('CreateReviewBody', createReviewSchema);
+
+const ReviewStatsSchema = registry.register(
+  'ReviewStats',
+  z.object({
+    totalReviews: z.number().int(),
+    ratingCounts: z.object({
+      '1': z.number().int(),
+      '2': z.number().int(),
+      '3': z.number().int(),
+      '4': z.number().int(),
+      '5': z.number().int(),
+    }),
+    mediaCount: z.number().int(),
+  }),
+);
 
 const CollectionRecipeItemSchema = z.object({
   recipeId: z.string().uuid(),
@@ -239,7 +261,8 @@ registry.registerPath({
   path: '/api/v1/users/me',
   tags: ['Users'],
   summary: 'Provision user profile',
-  description: 'Creates a user row on first login. Idempotent — returns the existing user if already provisioned.',
+  description:
+    'Creates a user row on first login. Idempotent — returns the existing user if already provisioned.',
   security: [{ bearerAuth: [] }],
   request: {
     body: { content: { 'application/json': { schema: ProvisionUserBody } } },
@@ -247,15 +270,28 @@ registry.registerPath({
   responses: {
     201: {
       description: 'User created',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) } },
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) },
+      },
     },
     200: {
       description: 'User already provisioned (idempotent)',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) } },
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    409: { description: 'Username already taken', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'Username already taken',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -268,10 +304,18 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Authenticated user profile',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) } },
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -287,11 +331,22 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated user profile',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) } },
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    409: { description: 'Username already taken', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'Username already taken',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -306,9 +361,16 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Public user profile',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: PublicUserSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: PublicUserSchema }),
+        },
+      },
     },
-    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -317,16 +379,24 @@ registry.registerPath({
   path: '/api/v1/users/username/{username}',
   tags: ['Users'],
   summary: 'Get public user profile by username',
-  description: 'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route.',
+  description:
+    'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route.',
   request: {
     params: z.object({ username: z.string() }),
   },
   responses: {
     200: {
       description: 'Public user profile',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: PublicUserSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: PublicUserSchema }),
+        },
+      },
     },
-    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -353,7 +423,10 @@ registry.registerPath({
         },
       },
     },
-    422: { description: 'Invalid query params', content: { 'application/json': { schema: ErrorSchema } } },
+    422: {
+      description: 'Invalid query params',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -368,9 +441,16 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Full recipe detail',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -386,10 +466,20 @@ registry.registerPath({
   responses: {
     201: {
       description: 'Recipe created',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -406,12 +496,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -428,12 +534,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -448,9 +570,18 @@ registry.registerPath({
   },
   responses: {
     204: { description: 'Recipe deleted' },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -480,12 +611,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe with the new cover image URL',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Missing/invalid file, or wrong type/size', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Missing/invalid file, or wrong type/size',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -501,11 +648,24 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe with cover image cleared',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -537,11 +697,24 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe with the new gallery images appended',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
     422: {
       description: 'Missing/invalid files, wrong type/size, or gallery would exceed 10 images',
       content: { 'application/json': { schema: ErrorSchema } },
@@ -554,7 +727,8 @@ registry.registerPath({
   path: '/api/v1/recipes/{recipeId}/images',
   tags: ['Recipes'],
   summary: 'Remove gallery images',
-  description: 'Removes the given relative storage paths from the recipe gallery and deletes them from R2.',
+  description:
+    'Removes the given relative storage paths from the recipe gallery and deletes them from R2.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ recipeId: z.string().uuid() }),
@@ -563,12 +737,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated recipe with the given gallery images removed',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the recipe owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the recipe owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -609,9 +799,16 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Full recipe detail',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+        },
+      },
     },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -639,8 +836,38 @@ registry.registerPath({
         },
       },
     },
-    404: { description: 'Recipe not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Invalid query params', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid query params',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/recipes/{recipeId}/reviews/summary',
+  tags: ['Reviews'],
+  summary: "Get totalized rating breakdown and media count for a recipe's reviews",
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Totalized review stats',
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: ReviewStatsSchema }),
+        },
+      },
+    },
+    404: {
+      description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -656,12 +883,26 @@ registry.registerPath({
   responses: {
     201: {
       description: 'Review created',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) } },
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Recipe or user not found', content: { 'application/json': { schema: ErrorSchema } } },
-    409: { description: 'Already reviewed this recipe', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe or user not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'Already reviewed this recipe',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -689,7 +930,10 @@ registry.registerPath({
         },
       },
     },
-    404: { description: 'User not found', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -704,9 +948,16 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Collection detail',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    404: { description: 'Collection not found or private', content: { 'application/json': { schema: ErrorSchema } } },
+    404: {
+      description: 'Collection not found or private',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -722,10 +973,20 @@ registry.registerPath({
   responses: {
     201: {
       description: 'Collection created',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -742,12 +1003,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated collection',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the collection owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -764,12 +1041,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Updated collection',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the collection owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -784,9 +1077,18 @@ registry.registerPath({
   },
   responses: {
     204: { description: 'Collection deleted' },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the collection owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -803,12 +1105,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Collection with updated recipe list',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the collection owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -825,12 +1143,28 @@ registry.registerPath({
   responses: {
     200: {
       description: 'Collection with updated recipe list',
-      content: { 'application/json': { schema: z.object({ success: z.literal(true), data: CollectionSchema }) } },
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Not the collection owner', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
-    422: { description: 'Validation error', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the collection owner',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -848,10 +1182,22 @@ registry.registerPath({
       description: 'Followed successfully',
       content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
-    403: { description: 'Collection is private or own collection', content: { 'application/json': { schema: ErrorSchema } } },
-    404: { description: 'Collection not found', content: { 'application/json': { schema: ErrorSchema } } },
-    409: { description: 'Already following', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Collection is private or own collection',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'Already following',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -869,7 +1215,10 @@ registry.registerPath({
       description: 'Unfollowed successfully',
       content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
     },
-    401: { description: 'Missing or invalid token', content: { 'application/json': { schema: ErrorSchema } } },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -890,7 +1239,10 @@ registry.registerPath({
       description: 'Event processed',
       content: { 'application/json': { schema: z.object({ success: z.literal(true) }) } },
     },
-    400: { description: 'Invalid or unverifiable webhook signature', content: { 'application/json': { schema: ErrorSchema } } },
+    400: {
+      description: 'Invalid or unverifiable webhook signature',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -903,7 +1255,8 @@ export function buildOpenApiDocument(serverUrl = '/') {
     info: {
       title: 'Cookbook API',
       version: '1.0.0',
-      description: 'REST API for a cooking recipes website. Authentication is handled via Keycloak JWTs.',
+      description:
+        'REST API for a cooking recipes website. Authentication is handled via Keycloak JWTs.',
     },
     servers: [{ url: serverUrl }],
   });
