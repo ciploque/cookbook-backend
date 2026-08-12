@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../../middlewares/authenticate';
 import { validate } from '../../middlewares/validate';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { createReview, listReviewsByRecipe } from './review.controller';
+import { createReview, getRecipeReviewStats, listReviewsByRecipe } from './review.controller';
 import { createReviewSchema, reviewQuerySchema } from './review.schema';
 
 const router = Router();
@@ -17,5 +17,6 @@ recipeReviewsRouter.get(
   validate(reviewQuerySchema, 'query'),
   asyncHandler(listReviewsByRecipe),
 );
+recipeReviewsRouter.get('/:recipeId/reviews/summary', asyncHandler(getRecipeReviewStats));
 
 export default router;

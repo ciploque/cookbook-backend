@@ -14,3 +14,8 @@ export async function createReview(req: Request, res: Response): Promise<void> {
   const review = await reviewService.createReview(req.user!.sub, req.body as CreateReviewInput);
   res.status(201).json({ success: true, data: review });
 }
+
+export async function getRecipeReviewStats(req: Request, res: Response): Promise<void> {
+  const stats = await reviewService.getReviewStats(req.params.recipeId as string);
+  res.json({ success: true, data: stats });
+}

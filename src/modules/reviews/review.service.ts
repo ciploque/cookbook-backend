@@ -3,11 +3,31 @@ import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { updateIndexedRecipeRating } from '../recipes/recipe.search';
-import { CreateReviewInput, ReviewQuery } from './review.schema';
+import { CreateReviewInput, ReviewFilter, ReviewOrder, ReviewQuery } from './review.schema';
 
 const reviewInclude = {
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
 } satisfies Prisma.ReviewInclude;
+
+const RATING_VALUES = [1, 2, 3, 4, 5] as const;
+
+function buildReviewWhere(recipeId: string, filter?: ReviewFilter): Prisma.ReviewWhereInput {
+  if (filter === 'media') {
+    return { recipeId, imageUrls: { isEmpty: false } };
+  }
+  if (filter?.startsWith('rating:')) {
+    return { recipeId, rating: Number(filter.split(':')[1]) };
+  }
+  return { recipeId };
+}
+
+function buildReviewOrderBy(
+  order: ReviewOrder,
+): Prisma.ReviewOrderByWithRelationInput | Prisma.ReviewOrderByWithRelationInput[] {
+  if (order === 'rating_asc') return [{ rating: 'asc' }, { createdAt: 'desc' }];
+  if (order === 'rating_desc') return [{ rating: 'desc' }, { createdAt: 'desc' }];
+  return { createdAt: 'desc' };
+}
 
 function formatReview(review: Prisma.ReviewGetPayload<{ include: typeof reviewInclude }>) {
   return {
@@ -26,15 +46,17 @@ export async function listReviewsByRecipe(recipeId: string, query: ReviewQuery) 
   const recipe = await prisma.recipe.findUnique({ where: { id: recipeId }, select: { id: true } });
   if (!recipe) throw ApiError.notFound('Recipe');
 
-  const { page, limit } = query;
+  const { page, limit, filter, order } = query;
   const skip = toSkip(page, limit);
+  const where = buildReviewWhere(recipeId, filter);
+  const orderBy = buildReviewOrderBy(order);
 
   const [total, reviews] = await Promise.all([
-    prisma.review.count({ where: { recipeId } }),
+    prisma.review.count({ where }),
     prisma.review.findMany({
-      where: { recipeId },
+      where,
       include: reviewInclude,
-      orderBy: { createdAt: 'desc' },
+      orderBy,
       skip,
       take: limit,
     }),
@@ -46,11 +68,45 @@ export async function listReviewsByRecipe(recipeId: string, query: ReviewQuery) 
   };
 }
 
+export async function getReviewStats(recipeId: string) {
+  const recipe = await prisma.recipe.findUnique({
+    where: { id: recipeId },
+    select: { id: true, reviewCount: true },
+  });
+  if (!recipe) throw ApiError.notFound('Recipe');
+
+  const [ratingGroups, mediaCount] = await Promise.all([
+    prisma.review.groupBy({
+      by: ['rating'],
+      where: { recipeId },
+      _count: { _all: true },
+    }),
+    prisma.review.count({ where: { recipeId, imageUrls: { isEmpty: false } } }),
+  ]);
+
+  const ratingCounts = Object.fromEntries(RATING_VALUES.map((r) => [String(r), 0])) as Record<
+    string,
+    number
+  >;
+  for (const group of ratingGroups) {
+    ratingCounts[String(group.rating)] = group._count._all;
+  }
+
+  return {
+    totalReviews: recipe.reviewCount,
+    ratingCounts,
+    mediaCount,
+  };
+}
+
 export async function createReview(authProviderId: string, input: CreateReviewInput) {
   const author = await prisma.user.findUnique({ where: { authProviderId } });
   if (!author) throw ApiError.notFound('User');
 
-  const recipe = await prisma.recipe.findUnique({ where: { id: input.recipeId }, select: { id: true } });
+  const recipe = await prisma.recipe.findUnique({
+    where: { id: input.recipeId },
+    select: { id: true },
+  });
   if (!recipe) throw ApiError.notFound('Recipe');
 
   try {
@@ -70,7 +126,7 @@ export async function createReview(authProviderId: string, input: CreateReviewIn
         SET "reviewCount" = "reviewCount" + 1,
             "ratingSum" = "ratingSum" + ${input.rating},
             "averageRating" = ("ratingSum" + ${input.rating})::float / ("reviewCount" + 1)
-        WHERE id = ${input.recipeId}
+        WHERE id = ${input.recipeId}::uuid
         RETURNING "averageRating", "reviewCount"
       `,
     ]);

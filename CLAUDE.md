@@ -115,7 +115,8 @@ cookbook-backend/
 │   │   ├── recipes/
 │   │   │   └── recipe.service.test.ts
 │   │   ├── reviews/
-│   │   │   └── review.service.test.ts
+│   │   │   ├── review.service.test.ts
+│   │   │   └── review.schema.test.ts
 │   │   ├── collections/
 │   │   │   └── collection.service.test.ts
 │   │   ├── webhooks/
@@ -534,6 +535,7 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/recipes/:recipeId/reviews` | Public | Paginated reviews for a recipe |
+| GET | `/recipes/:recipeId/reviews/summary` | Public | Totalized rating breakdown + media count for a recipe's reviews |
 | POST | `/reviews` | Required | Create a review |
 
 #### GET /recipes/:recipeId/reviews — Query Parameters
@@ -542,6 +544,29 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 |---|---|---|
 | `page` | number | Default `1` |
 | `limit` | number | Default `20`, max `50` |
+| `filter` | string | Optional, not cumulative — one value at a time. `rating:1`–`rating:5` filters to a single rating; `media` filters to reviews with at least one image attached. Omit for all reviews (default). |
+| `order` | string | Optional. `newest` (default, most recent first) \| `rating_asc` (lowest rating first) \| `rating_desc` (highest rating first) |
+
+#### GET /recipes/:recipeId/reviews/summary
+
+Totalized counts for a recipe's reviews — how many per star rating, and how many
+have at least one image attached. Optimized to avoid fetching review rows: the
+total comes from the already-denormalized `Recipe.reviewCount` (see
+[Schema decisions](#database-schema)), and the rating breakdown / media count are
+two aggregate queries (`GROUP BY rating`, and a `COUNT` filtered on non-empty
+`imageUrls`) run in parallel, both scoped by the existing `@@index([recipeId])` —
+no new index needed.
+
+**Response:**
+```json
+{
+  "totalReviews": 42,
+  "ratingCounts": { "1": 0, "2": 3, "3": 5, "4": 10, "5": 24 },
+  "mediaCount": 14
+}
+```
+
+**Errors:** `404 RECIPE_NOT_FOUND` if recipe does not exist.
 
 #### POST /reviews — Request Body
 
@@ -1039,7 +1064,8 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/utils/imageUrl.test.ts` | 4 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
-| `tests/unit/reviews/review.service.test.ts` | 10 | listReviewsByRecipe (pagination, recipe not found), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null) |
+| `tests/unit/reviews/review.service.test.ts` | 18 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count) |
+| `tests/unit/reviews/review.schema.test.ts` | 8 | `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
 | `tests/unit/collections/collection.service.test.ts` | 27 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |

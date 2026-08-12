@@ -10,6 +10,7 @@ vi.mock('../../../src/config/database', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
+      groupBy: vi.fn(),
     },
     user: {
       findUnique: vi.fn(),
@@ -29,6 +30,7 @@ import {
   listReviewsByRecipe,
   createReview,
   getReviewAuthorId,
+  getReviewStats,
 } from '../../../src/modules/reviews/review.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -92,6 +94,135 @@ describe('listReviewsByRecipe()', () => {
 
     expect(result.meta).toMatchObject({ page: 2, hasPrevPage: true, hasNextPage: true });
   });
+
+  it('filters by a single rating when filter is rating:N', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(1);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', {
+      page: 1,
+      limit: 20,
+      filter: 'rating:4',
+      order: 'newest',
+    });
+
+    expect(prisma.review.count).toHaveBeenCalledWith({
+      where: { recipeId: 'recipe-uuid', rating: 4 },
+    });
+    expect(prisma.review.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { recipeId: 'recipe-uuid', rating: 4 } }),
+    );
+  });
+
+  it('filters to reviews with images when filter is media', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(1);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', {
+      page: 1,
+      limit: 20,
+      filter: 'media',
+      order: 'newest',
+    });
+
+    const expectedWhere = { recipeId: 'recipe-uuid', imageUrls: { isEmpty: false } };
+    expect(prisma.review.count).toHaveBeenCalledWith({ where: expectedWhere });
+    expect(prisma.review.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expectedWhere }),
+    );
+  });
+
+  it('applies no rating/media filter when filter is omitted', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(2);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', { page: 1, limit: 20, order: 'newest' });
+
+    expect(prisma.review.count).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+  });
+
+  it('orders by rating ascending (with createdAt tiebreak) when order is rating_asc', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(1);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', { page: 1, limit: 20, order: 'rating_asc' });
+
+    expect(prisma.review.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: [{ rating: 'asc' }, { createdAt: 'desc' }] }),
+    );
+  });
+
+  it('orders by rating descending (with createdAt tiebreak) when order is rating_desc', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(1);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', { page: 1, limit: 20, order: 'rating_desc' });
+
+    expect(prisma.review.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: [{ rating: 'desc' }, { createdAt: 'desc' }] }),
+    );
+  });
+
+  it('defaults to newest-first ordering when order is newest', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(1);
+    vi.mocked(prisma.review.findMany).mockResolvedValue([mockReview] as never);
+
+    await listReviewsByRecipe('recipe-uuid', { page: 1, limit: 20, order: 'newest' });
+
+    expect(prisma.review.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
+    );
+  });
+});
+
+// ─── getReviewStats ───────────────────────────────────────────────────────────
+
+describe('getReviewStats()', () => {
+  it('throws RECIPE_NOT_FOUND when recipe does not exist', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(null);
+
+    await expect(getReviewStats('missing-id')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'RECIPE_NOT_FOUND',
+    });
+
+    expect(prisma.review.groupBy).not.toHaveBeenCalled();
+    expect(prisma.review.count).not.toHaveBeenCalled();
+  });
+
+  it('returns totalReviews from the denormalized recipe count, zero-filled rating breakdown, and media count', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
+      id: 'recipe-uuid',
+      reviewCount: 42,
+    } as never);
+    vi.mocked(prisma.review.groupBy).mockResolvedValue([
+      { rating: 4, _count: { _all: 10 } },
+      { rating: 5, _count: { _all: 24 } },
+    ] as never);
+    vi.mocked(prisma.review.count).mockResolvedValue(14);
+
+    const result = await getReviewStats('recipe-uuid');
+
+    expect(result).toEqual({
+      totalReviews: 42,
+      ratingCounts: { '1': 0, '2': 0, '3': 0, '4': 10, '5': 24 },
+      mediaCount: 14,
+    });
+    expect(prisma.review.groupBy).toHaveBeenCalledWith({
+      by: ['rating'],
+      where: { recipeId: 'recipe-uuid' },
+      _count: { _all: true },
+    });
+    expect(prisma.review.count).toHaveBeenCalledWith({
+      where: { recipeId: 'recipe-uuid', imageUrls: { isEmpty: false } },
+    });
+  });
 });
 
 // ─── createReview ─────────────────────────────────────────────────────────────
@@ -123,6 +254,26 @@ describe('createReview()', () => {
     );
     expect(prisma.$queryRaw).toHaveBeenCalled();
     expect(result).toMatchObject({ id: 'review-uuid', rating: 4 });
+  });
+
+  it('casts recipeId to ::uuid in the raw stats-update query (recipes.id is a native uuid column)', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: 4, reviewCount: 1 }],
+    ] as never);
+
+    await createReview('user_author', {
+      recipeId: 'recipe-uuid',
+      rating: 4,
+      imageUrls: [],
+    });
+
+    const [strings] = vi.mocked(prisma.$queryRaw).mock.calls[0] as unknown as [readonly string[]];
+    // The segment right after the recipeId placeholder must start with the cast —
+    // without it, Postgres rejects the comparison with "operator does not exist: uuid = text".
+    expect(strings[strings.length - 1].trimStart().startsWith('::uuid')).toBe(true);
   });
 
   it('recomputes and syncs recipe rating stats to Meilisearch', async () => {
