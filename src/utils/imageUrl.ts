@@ -2,13 +2,17 @@ import { z } from 'zod';
 import { trustedImageDomains } from '../config/env';
 
 function isTrustedUrl(url: string): boolean {
-  if (trustedImageDomains.length === 0) return true; // no allowlist configured → allow all
+  let parsed: URL;
   try {
-    const hostname = new URL(url).hostname;
-    return trustedImageDomains.includes(hostname);
+    parsed = new URL(url);
   } catch {
     return false;
   }
+  // https-only regardless of allowlist config — closes off javascript:/data: schemes,
+  // which a bare z.string().url() happily accepts since it only checks the string parses.
+  if (parsed.protocol !== 'https:') return false;
+  if (trustedImageDomains.length === 0) return true; // no domain allowlist configured → allow any https host
+  return trustedImageDomains.includes(parsed.hostname);
 }
 
 export const trustedImageUrlSchema = z

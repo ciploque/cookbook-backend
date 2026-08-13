@@ -12,6 +12,13 @@ vi.mock('../../../src/config/database', () => ({
   },
 }));
 
+// user.service imports trustedImageUrlSchema (via utils/imageUrl), which reads
+// trustedImageDomains from config/env — mock it directly rather than pulling in
+// real env.ts validation (same reasoning as the recipe.search mock elsewhere).
+vi.mock('../../../src/config/env', () => ({
+  trustedImageDomains: [] as string[],
+}));
+
 import { prisma } from '../../../src/config/database';
 import {
   provisionUser,
@@ -273,6 +280,16 @@ describe('provisionFromWebhook()', () => {
         avatarUrl: 'https://img.clerk.com/joao.png',
       },
     });
+  });
+
+  it('drops a malicious imageUrl instead of writing it as avatarUrl', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+    vi.mocked(prisma.user.create).mockResolvedValue(mockUser);
+
+    await provisionFromWebhook({ ...clerkUser, imageUrl: 'javascript:alert(1)' });
+
+    const callArgs = vi.mocked(prisma.user.create).mock.calls[0][0];
+    expect(callArgs.data.avatarUrl).toBeUndefined();
   });
 
   it('falls back to the email local-part when Clerk username is null', async () => {

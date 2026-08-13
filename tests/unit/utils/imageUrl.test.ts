@@ -35,4 +35,26 @@ describe('trustedImageUrlSchema', () => {
     const result = trustedImageUrlSchema.safeParse('https://evil.example.com/pic.jpg');
     expect(result.success).toBe(false);
   });
+
+  it('rejects a javascript: URI even when no allowlist is configured', () => {
+    const result = trustedImageUrlSchema.safeParse('javascript:alert(1)');
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a data: URI even when no allowlist is configured', () => {
+    const result = trustedImageUrlSchema.safeParse('data:text/html,<script>alert(1)</script>');
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a non-https URL even when no allowlist is configured', () => {
+    const result = trustedImageUrlSchema.safeParse('http://cdn.example.com/pic.jpg');
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a javascript: URI even when a domain allowlist is configured', () => {
+    trustedImageDomains.push('cdn.example.com');
+
+    const result = trustedImageUrlSchema.safeParse('javascript:alert(1)');
+    expect(result.success).toBe(false);
+  });
 });

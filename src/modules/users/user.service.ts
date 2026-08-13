@@ -3,6 +3,7 @@ import { User, Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { ProvisionUserInput, UpdateUserInput } from './user.schema';
+import { trustedImageUrlSchema } from '../../utils/imageUrl';
 
 export async function provisionUser(
   authProviderId: string,
@@ -125,6 +126,12 @@ export async function provisionFromWebhook(
 
   const baseUsername = deriveUsername(data);
   const displayName = [data.firstName, data.lastName].filter(Boolean).join(' ') || baseUsername;
+  // Clerk's payload bypasses the Zod schema on this webhook-driven path, so validate
+  // it the same way (https-only, optional domain allowlist) rather than trusting it blindly.
+  const avatarUrl =
+    data.imageUrl && trustedImageUrlSchema.safeParse(data.imageUrl).success
+      ? data.imageUrl
+      : undefined;
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const username = attempt === 0 ? baseUsername : `${baseUsername}-${randomSuffix()}`;
@@ -134,7 +141,7 @@ export async function provisionFromWebhook(
           authProviderId: data.id,
           username,
           displayName,
-          avatarUrl: data.imageUrl ?? undefined,
+          avatarUrl,
         },
       });
       return { user, created: true };

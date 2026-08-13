@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { trustedImageUrlSchema } from '../../utils/imageUrl';
 
 const usernameField = z
   .string()
@@ -12,14 +13,14 @@ const usernameField = z
 export const provisionUserSchema = z.object({
   username: usernameField,
   displayName: z.string().min(1).max(80),
-  avatarUrl: z.string().url().optional(),
+  avatarUrl: trustedImageUrlSchema.optional(),
 });
 
 export const updateUserSchema = z.object({
   username: usernameField.optional(),
   displayName: z.string().min(1).max(80).optional(),
   bio: z.string().max(500).optional(),
-  avatarUrl: z.string().url().optional(),
+  avatarUrl: trustedImageUrlSchema.optional(),
 });
 
 export type ProvisionUserInput = z.infer<typeof provisionUserSchema>;

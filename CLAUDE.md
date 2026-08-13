@@ -185,7 +185,7 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `CLERK_PUBLISHABLE_KEY` | no | — | Clerk publishable key (optional for pure backend) |
 | `CLERK_WEBHOOK_SIGNING_SECRET` | yes | — | Clerk dashboard → Webhooks → Signing Secret (`whsec_...`); verifies `POST /webhooks/clerk` |
 | `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins |
-| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in the remaining raw-URL image fields: `RecipeStep.imageUrl` and `Review.imageUrls` (enforced via `trustedImageUrlSchema` in `src/utils/imageUrl.ts`). Recipe cover/gallery images instead go through the R2 upload endpoints, not a raw URL field. Empty/unset → no allowlist, any syntactically valid URL is accepted. |
+| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in the remaining raw-URL image fields: `RecipeStep.imageUrl`, `Review.imageUrls`, and `User.avatarUrl` (enforced via `trustedImageUrlSchema` in `src/utils/imageUrl.ts`). Recipe cover/gallery images instead go through the R2 upload endpoints, not a raw URL field. These fields are always `https:`-only regardless of this var — that check is unconditional, not part of the allowlist. Empty/unset → no domain allowlist, any `https:` URL is accepted; non-`https:` schemes (`javascript:`, `data:`, etc.) are always rejected. |
 | `R2_ACCOUNT_ID` | yes | — | Cloudflare account id; builds the R2 S3-compatible endpoint `https://<id>.r2.cloudflarestorage.com` |
 | `R2_ACCESS_KEY_ID` | yes | — | R2 API token access key (Dashboard → R2 → Manage API Tokens) |
 | `R2_SECRET_ACCESS_KEY` | yes | — | R2 API token secret key |
@@ -526,7 +526,7 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 
 **No full URLs:** `coverImageUrl`/`imageUrls` in every recipe API response are relative paths with a leading `/` (e.g. `/recipes/<id>/cover/<uuid>.jpg`), never a full `https://` URL. The frontend prepends its own base/CDN URL. `DELETE /recipes/:recipeId/images` expects `paths` to be the exact leading-slash values as returned in `imageUrls`.
 
-`RecipeStep.imageUrl` (per-step images) is unchanged — still a raw URL field, not part of this pipeline, but now validated against `TRUSTED_IMAGE_DOMAINS` via `trustedImageUrlSchema` (see [Environment Variables](#environment-variables)). `Review.imageUrls` uses the same schema. `User.avatarUrl` is still a plain `z.string().url()` field, not domain-restricted; it can adopt `storage.service.ts` or `trustedImageUrlSchema` the same way later.
+`RecipeStep.imageUrl` (per-step images) is unchanged — still a raw URL field, not part of this pipeline, but now validated against `TRUSTED_IMAGE_DOMAINS` via `trustedImageUrlSchema` (see [Environment Variables](#environment-variables)). `Review.imageUrls` and `User.avatarUrl` use the same schema — `avatarUrl` is no longer a bare `z.string().url()`, since that only checks the string parses as a URL and does not restrict the scheme (`javascript:`/`data:` URIs pass it). `trustedImageUrlSchema` always requires `https:` (unconditionally, independent of whether `TRUSTED_IMAGE_DOMAINS` is configured) on top of the optional domain allowlist. `provisionFromWebhook` (`user.service.ts`) validates Clerk's `image_url` the same way before writing it, since that path bypasses the Zod schema.
 
 ---
 
