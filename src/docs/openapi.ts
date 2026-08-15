@@ -13,6 +13,7 @@ import {
   createReviewSchema,
   removeReviewImagesSchema,
   reviewQuerySchema,
+  updateReviewSchema,
 } from '../modules/reviews/review.schema';
 import {
   createCollectionSchema,
@@ -182,6 +183,7 @@ const RemoveGalleryImagesBody = registry.register(
 const ProvisionUserBody = registry.register('ProvisionUserBody', provisionUserSchema);
 const UpdateUserBody = registry.register('UpdateUserBody', updateUserSchema);
 const CreateReviewBody = registry.register('CreateReviewBody', createReviewSchema);
+const UpdateReviewBody = registry.register('UpdateReviewBody', updateReviewSchema);
 const RemoveReviewImagesBody = registry.register(
   'RemoveReviewImagesBody',
   removeReviewImagesSchema,
@@ -937,6 +939,37 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: 'get',
+  path: '/api/v1/recipes/{recipeId}/reviews/me',
+  tags: ['Reviews'],
+  summary: "Get the authenticated user's own review of a recipe",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "The caller's review of this recipe",
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe or user not found, or the caller has not reviewed this recipe',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
   method: 'post',
   path: '/api/v1/reviews',
   tags: ['Reviews'],
@@ -966,6 +999,78 @@ registry.registerPath({
     },
     422: {
       description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'put',
+  path: '/api/v1/reviews/{reviewId}',
+  tags: ['Reviews'],
+  summary: 'Update your own review',
+  description:
+    'Full replace of the review body: `rating` is required, and omitting `content` clears it. ' +
+    "Images are unaffected. The recipe's rating stats are recomputed from the reviews table.",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ reviewId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: UpdateReviewBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Updated review',
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the review author',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Review not found (RESOURCE_NOT_FOUND, raised by the owner guard)',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/reviews/{reviewId}',
+  tags: ['Reviews'],
+  summary: 'Delete your own review',
+  description:
+    "Deletes the review, recomputes the recipe's rating stats from the reviews table, and " +
+    'deletes every attached image from R2.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ reviewId: z.string().uuid() }),
+  },
+  responses: {
+    204: { description: 'Review deleted' },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the review author',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Review not found (RESOURCE_NOT_FOUND, raised by the owner guard)',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },

@@ -8,9 +8,12 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import {
   addReviewImages,
   createReview,
+  deleteReview,
+  getMyReviewForRecipe,
   getRecipeReviewStats,
   listReviewsByRecipe,
   removeReviewImages,
+  updateReview,
 } from './review.controller';
 import { getReviewAuthorId } from './review.service';
 import {
@@ -19,6 +22,7 @@ import {
   removeReviewImagesSchema,
   reviewParamsSchema,
   reviewQuerySchema,
+  updateReviewSchema,
 } from './review.schema';
 
 const router = Router();
@@ -40,6 +44,21 @@ const uploadLimiter = rateLimit({
 });
 
 router.post('/', authenticate, validate(createReviewSchema, 'body'), asyncHandler(createReview));
+router.put(
+  '/:reviewId',
+  authenticate,
+  validateReviewId,
+  asyncHandler(ownerGuard),
+  validate(updateReviewSchema, 'body'),
+  asyncHandler(updateReview),
+);
+router.delete(
+  '/:reviewId',
+  authenticate,
+  validateReviewId,
+  asyncHandler(ownerGuard),
+  asyncHandler(deleteReview),
+);
 router.post(
   '/:reviewId/images',
   authenticate,
@@ -72,6 +91,14 @@ recipeReviewsRouter.get(
   '/:recipeId/reviews/summary',
   validateRecipeId,
   asyncHandler(getRecipeReviewStats),
+);
+// Authenticated read: the caller's own review of this recipe. `me` is a literal sibling
+// of `summary`, so neither shadows the other nor the `/:recipeId/reviews` list above.
+recipeReviewsRouter.get(
+  '/:recipeId/reviews/me',
+  authenticate,
+  validateRecipeId,
+  asyncHandler(getMyReviewForRecipe),
 );
 
 export default router;

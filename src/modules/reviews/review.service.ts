@@ -4,7 +4,13 @@ import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { updateIndexedRecipeRating } from '../recipes/recipe.search';
 import { deleteImage, storeImage } from '../storage/storage.service';
-import { CreateReviewInput, ReviewFilter, ReviewOrder, ReviewQuery } from './review.schema';
+import {
+  CreateReviewInput,
+  ReviewFilter,
+  ReviewOrder,
+  ReviewQuery,
+  UpdateReviewInput,
+} from './review.schema';
 
 const reviewInclude = {
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
@@ -42,6 +48,26 @@ function formatReview(review: Prisma.ReviewGetPayload<{ include: typeof reviewIn
     createdAt: review.createdAt,
     updatedAt: review.updatedAt,
   };
+}
+
+// Recomputes the denormalized rating stats on `recipes` from the `reviews` table itself,
+// rather than incrementing/decrementing — required for update/delete, where a decrement
+// can't express a rating change, and it self-heals any drift as a side effect.
+// Meant to be passed to the same $transaction as the review write, *after* it: the array
+// runs in order, so the aggregate below sees the new state.
+function recomputeRecipeRatingStats(recipeId: string) {
+  return prisma.$queryRaw<{ averageRating: number | null; reviewCount: number }[]>(Prisma.sql`
+    UPDATE recipes r
+    SET "reviewCount"   = s.cnt,
+        "ratingSum"     = s.total,
+        "averageRating" = CASE WHEN s.cnt = 0 THEN NULL ELSE s.total::float / s.cnt END
+    FROM (
+      SELECT count(*)::int AS cnt, coalesce(sum(rating), 0)::int AS total
+      FROM reviews WHERE "recipeId" = ${recipeId}::uuid
+    ) s
+    WHERE r.id = ${recipeId}::uuid
+    RETURNING r."averageRating", r."reviewCount"
+  `);
 }
 
 export async function listReviewsByRecipe(recipeId: string, query: ReviewQuery) {
@@ -141,6 +167,61 @@ export async function createReview(authProviderId: string, input: CreateReviewIn
     }
     throw err;
   }
+}
+
+export async function getMyReviewForRecipe(authProviderId: string, recipeId: string) {
+  const recipe = await prisma.recipe.findUnique({ where: { id: recipeId }, select: { id: true } });
+  if (!recipe) throw ApiError.notFound('Recipe');
+
+  const author = await prisma.user.findUnique({
+    where: { authProviderId },
+    select: { id: true },
+  });
+  if (!author) throw ApiError.notFound('User');
+
+  const review = await prisma.review.findUnique({
+    where: { recipeId_authorId: { recipeId, authorId: author.id } },
+    include: reviewInclude,
+  });
+  if (!review) throw ApiError.notFound('Review');
+
+  return formatReview(review);
+}
+
+export async function updateReview(reviewId: string, input: UpdateReviewInput) {
+  const existing = await prisma.review.findUnique({
+    where: { id: reviewId },
+    select: { recipeId: true },
+  });
+  if (!existing) throw ApiError.notFound('Review');
+
+  const [review, stats] = await prisma.$transaction([
+    prisma.review.update({
+      where: { id: reviewId },
+      data: { rating: input.rating, content: input.content ?? null },
+      include: reviewInclude,
+    }),
+    recomputeRecipeRatingStats(existing.recipeId),
+  ]);
+
+  void updateIndexedRecipeRating(existing.recipeId, stats[0].averageRating, stats[0].reviewCount);
+  return formatReview(review);
+}
+
+export async function deleteReview(reviewId: string): Promise<void> {
+  const existing = await prisma.review.findUnique({
+    where: { id: reviewId },
+    select: { recipeId: true, imageUrls: true },
+  });
+  if (!existing) throw ApiError.notFound('Review');
+
+  const [, stats] = await prisma.$transaction([
+    prisma.review.delete({ where: { id: reviewId } }),
+    recomputeRecipeRatingStats(existing.recipeId),
+  ]);
+
+  void updateIndexedRecipeRating(existing.recipeId, stats[0].averageRating, stats[0].reviewCount);
+  existing.imageUrls.forEach((key) => void deleteImage(key));
 }
 
 export async function getReviewAuthorId(reviewId: string): Promise<string | null> {

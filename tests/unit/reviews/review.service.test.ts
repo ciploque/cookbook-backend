@@ -11,6 +11,7 @@ vi.mock('../../../src/config/database', () => ({
       count: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      delete: vi.fn(),
       groupBy: vi.fn(),
     },
     user: {
@@ -38,9 +39,12 @@ import {
   addReviewImages,
   listReviewsByRecipe,
   createReview,
+  deleteReview,
+  getMyReviewForRecipe,
   getReviewAuthorId,
   getReviewStats,
   removeReviewImages,
+  updateReview,
 } from '../../../src/modules/reviews/review.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -336,6 +340,171 @@ describe('createReview()', () => {
     await expect(
       createReview('user_author', { recipeId: 'recipe-uuid', rating: 5 }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+  });
+});
+
+// ─── getMyReviewForRecipe ─────────────────────────────────────────────────────
+
+describe('getMyReviewForRecipe()', () => {
+  it("returns the caller's own review, looked up by the recipeId_authorId unique", async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(mockReview as never);
+
+    const result = await getMyReviewForRecipe('user_author', 'recipe-uuid');
+
+    expect(prisma.review.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { recipeId_authorId: { recipeId: 'recipe-uuid', authorId: 'author-uuid' } },
+      }),
+    );
+    expect(result).toMatchObject({ id: 'review-uuid', rating: 4 });
+  });
+
+  it('throws RECIPE_NOT_FOUND when the recipe does not exist', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(null);
+
+    await expect(getMyReviewForRecipe('user_author', 'missing-id')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'RECIPE_NOT_FOUND',
+    });
+
+    expect(prisma.review.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('throws USER_NOT_FOUND when the authenticated user has no profile', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
+    await expect(getMyReviewForRecipe('user_unknown', 'recipe-uuid')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'USER_NOT_FOUND',
+    });
+
+    expect(prisma.review.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('throws REVIEW_NOT_FOUND when the caller has not reviewed this recipe', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
+
+    await expect(getMyReviewForRecipe('user_author', 'recipe-uuid')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'REVIEW_NOT_FOUND',
+    });
+  });
+});
+
+// ─── updateReview ─────────────────────────────────────────────────────────────
+
+describe('updateReview()', () => {
+  it('updates rating and content and returns the formatted review', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue({ recipeId: 'recipe-uuid' } as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      { ...mockReview, rating: 5, content: 'Even better' },
+      [{ averageRating: 5, reviewCount: 1 }],
+    ] as never);
+
+    const result = await updateReview('review-uuid', { rating: 5, content: 'Even better' });
+
+    expect(prisma.review.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'review-uuid' },
+        data: { rating: 5, content: 'Even better' },
+      }),
+    );
+    expect(result).toMatchObject({ id: 'review-uuid', rating: 5, content: 'Even better' });
+  });
+
+  it('clears content when it is omitted (PUT is a full replace)', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue({ recipeId: 'recipe-uuid' } as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      { ...mockReview, content: null },
+      [{ averageRating: 3, reviewCount: 1 }],
+    ] as never);
+
+    await updateReview('review-uuid', { rating: 3 });
+
+    expect(prisma.review.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { rating: 3, content: null } }),
+    );
+  });
+
+  it('recomputes the recipe rating stats in the same transaction and syncs Meilisearch', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue({ recipeId: 'recipe-uuid' } as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: 2.5, reviewCount: 4 }],
+    ] as never);
+
+    await updateReview('review-uuid', { rating: 1 });
+
+    // The recompute is the raw statement passed into $transaction alongside the update.
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(updateIndexedRecipeRating).toHaveBeenCalledWith('recipe-uuid', 2.5, 4);
+  });
+
+  it('throws REVIEW_NOT_FOUND when the review does not exist', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
+
+    await expect(updateReview('missing-id', { rating: 4 })).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'REVIEW_NOT_FOUND',
+    });
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+// ─── deleteReview ─────────────────────────────────────────────────────────────
+
+describe('deleteReview()', () => {
+  it('deletes the review and recomputes/syncs the recipe rating stats', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue({
+      recipeId: 'recipe-uuid',
+      imageUrls: [],
+    } as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: null, reviewCount: 0 }],
+    ] as never);
+
+    await deleteReview('review-uuid');
+
+    expect(prisma.review.delete).toHaveBeenCalledWith({ where: { id: 'review-uuid' } });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(updateIndexedRecipeRating).toHaveBeenCalledWith('recipe-uuid', null, 0);
+  });
+
+  it('deletes every attached image from storage', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue({
+      recipeId: 'recipe-uuid',
+      imageUrls: ['/reviews/review-uuid/gallery/a.jpg', '/reviews/review-uuid/gallery/b.jpg'],
+    } as never);
+    vi.mocked(prisma.$transaction).mockResolvedValue([
+      mockReview,
+      [{ averageRating: null, reviewCount: 0 }],
+    ] as never);
+
+    await deleteReview('review-uuid');
+
+    expect(deleteImage).toHaveBeenCalledTimes(2);
+    expect(deleteImage).toHaveBeenCalledWith('/reviews/review-uuid/gallery/a.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/reviews/review-uuid/gallery/b.jpg');
+  });
+
+  it('throws REVIEW_NOT_FOUND when the review does not exist', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
+
+    await expect(deleteReview('missing-id')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'REVIEW_NOT_FOUND',
+    });
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(deleteImage).not.toHaveBeenCalled();
   });
 });
 

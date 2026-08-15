@@ -288,7 +288,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 | Limiter | Max | Applied to |
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), plus the cross-module GET routes: `recipeReviewsRouter`, `userRecipesRouter`, `userCollectionsRouter` |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -550,7 +550,10 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 |---|---|---|---|
 | GET | `/recipes/:recipeId/reviews` | Public | Paginated reviews for a recipe |
 | GET | `/recipes/:recipeId/reviews/summary` | Public | Totalized rating breakdown + media count for a recipe's reviews |
+| GET | `/recipes/:recipeId/reviews/me` | Required | The authenticated user's own review of this recipe |
 | POST | `/reviews` | Required | Create a review |
+| PUT | `/reviews/:reviewId` | Required + Owner | Full update of your own review (rating + content) |
+| DELETE | `/reviews/:reviewId` | Required + Owner | Delete your own review |
 | POST | `/reviews/:reviewId/images` | Required + Owner | Add review images (multipart, field `images`, up to 10 files per request) |
 | DELETE | `/reviews/:reviewId/images` | Required + Owner | Remove review images by relative path |
 
@@ -598,6 +601,66 @@ no new index needed.
 
 **Errors:** `404 RECIPE_NOT_FOUND` if recipe does not exist. `409 CONFLICT` if the authenticated user has already reviewed this recipe. One review per user per recipe is enforced by a DB unique constraint.
 
+#### GET /recipes/:recipeId/reviews/me
+
+The caller's own review of this recipe, in the same [Review Object Shape](#review-object-shape)
+as every other review response. Resolved through the `@@unique([recipeId, authorId])`
+constraint (a single indexed lookup, no scan). Intended for a recipe page that needs to know
+whether the caller has already reviewed — and to prefill the edit form if so.
+
+Unlike the two GET routes above it, this one requires auth. It's the only authenticated route
+on `recipeReviewsRouter`, so it inherits that mount's `readLimiter` rather than the
+`writeLimiter` the rest of the reviews module runs under — correct, since it's a read.
+
+**Errors:** `404 RECIPE_NOT_FOUND` if the recipe doesn't exist · `404 USER_NOT_FOUND` if the
+caller has no provisioned row · `404 REVIEW_NOT_FOUND` if the caller hasn't reviewed this
+recipe · `422 VALIDATION_ERROR` on a non-UUID `recipeId`.
+
+#### PUT /reviews/:reviewId — Request Body
+
+```json
+{
+  "rating": "number (required, integer 1–5)",
+  "content": "string (optional, max 2000)"
+}
+```
+
+A **full replace**, matching `PUT` semantics elsewhere in the repo: `rating` is required, and
+omitting `content` clears it (sets it to `null`). There is deliberately no `PATCH` counterpart —
+the body has two fields, so a partial variant would add a route, a schema and an OpenAPI block
+for no real gain.
+
+`recipeId` and `imageUrls` are **not** updatable through this body: a review can't be moved
+between recipes, and images stay server-managed via `POST`/`DELETE /reviews/:reviewId/images`.
+Both are stripped by `validate()` if passed.
+
+Recomputes the recipe's `reviewCount`/`ratingSum`/`averageRating` from the `Review` table in
+the same transaction, then syncs the new values to Meilisearch — see the denormalization bullet
+under [Schema decisions](#database-schema).
+
+**Errors:** `401 UNAUTHORIZED` · `403 FORBIDDEN` if not the review's author · `404 RESOURCE_NOT_FOUND`
+if the review doesn't exist (raised by the owner guard, which resolves before the service — the
+same generic code `DELETE /recipes/:recipeId` returns for a missing recipe; the service's own
+`REVIEW_NOT_FOUND` only fires if the row disappears between the two) ·
+`422 VALIDATION_ERROR` on a non-UUID `reviewId` or an invalid body.
+
+#### DELETE /reviews/:reviewId
+
+Deletes the caller's own review. Returns `204` with no body (same convention as
+`DELETE /recipes/:recipeId` and `DELETE /collections/:collectionId`).
+
+Side effects, in order: the review row is deleted and the recipe's rating stats recomputed in
+one transaction, the new stats are pushed to Meilisearch, and every image attached to the review
+is deleted from R2 (fire-and-forget, same as `deleteRecipe`). Deleting the only review of a
+recipe resets it to `reviewCount: 0`, `ratingSum: 0`, `averageRating: null`.
+
+Because the one-review-per-user unique constraint is on the row itself, deleting frees the user
+to review that recipe again — unlike reports, which have no withdrawal route.
+
+**Errors:** `401 UNAUTHORIZED` · `403 FORBIDDEN` if not the review's author · `404 RESOURCE_NOT_FOUND`
+if the review doesn't exist (from the owner guard — see the note on `PUT` above) ·
+`422 VALIDATION_ERROR` on a non-UUID `reviewId`.
+
 #### Review Images (Cloudflare R2)
 
 Same pipeline as [Recipe Cover & Gallery Images](#recipe-cover--gallery-images-cloudflare-r2--phase-2) — see [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage) for the shared mechanics.
@@ -607,7 +670,7 @@ Same pipeline as [Recipe Cover & Gallery Images](#recipe-cover--gallery-images-c
 | POST | `/reviews/:reviewId/images` | `images` (up to 10 files) | Appends to the review's images; **422** if it would exceed 10 images total |
 | DELETE | `/reviews/:reviewId/images` | JSON body `{ "paths": ["/reviews/<id>/gallery/<uuid>.jpg"] }` | Removes the given relative paths; deletes the R2 objects |
 
-Both require `authenticate` + an owner guard (`req.user.sub` must match the review's author, same `authorize()` factory as recipes) and the same stricter `uploadLimiter` (30 requests / 15 min) recipes use for image routes — stacked on top of the `writeLimiter` this router is otherwise mounted under (see [Rate Limiting](#rate-limiting)). Images are stored under `reviews/<reviewId>/gallery/<uuid>.jpg`. There is currently no `DELETE /reviews/:reviewId` endpoint, so unlike recipe delete there is no cascade image-cleanup-on-delete case yet.
+Both require `authenticate` + an owner guard (`req.user.sub` must match the review's author, same `authorize()` factory as recipes) and the same stricter `uploadLimiter` (30 requests / 15 min) recipes use for image routes — stacked on top of the `writeLimiter` this router is otherwise mounted under (see [Rate Limiting](#rate-limiting)). Images are stored under `reviews/<reviewId>/gallery/<uuid>.jpg`. `DELETE /reviews/:reviewId` cleans these up the same way `deleteRecipe` does — the row is loaded before the delete, so every stored path is known without a bucket listing.
 
 #### Review Object Shape
 
@@ -1012,7 +1075,7 @@ model Report {
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2. Both `createRecipeSchema.category` and `recipeQuerySchema.category` lowercase/trim the value at the Zod layer (`.trim().toLowerCase()`), so `listRecipes` can filter with a plain equality match against `@@index([category])`. Prisma's `mode: 'insensitive'` was deliberately avoided here — it compiles to a case-insensitive comparison (`ILIKE`/`LOWER()`-equivalent) that a plain B-tree index can't satisfy, forcing a sequential scan as the table grows. If you ever add a raw SQL path that writes `category` directly (bypassing the schema), normalize it the same way.
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
-- `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. `POST /reviews` is currently the only write path for reviews (no update/delete route exists), so the stat update in `review.service.ts#createReview` is a simple atomic increment-and-recompute (single `UPDATE ... RETURNING`) inside the same transaction as the review insert, with no decrement/recompute-on-delete case to handle yet. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document. If a delete/update review endpoint is added later, its handler must recompute (not just decrement) `averageRating`/`ratingSum`/`reviewCount` from the `Review` table for that recipe.
+- `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. Every review write path updates these stats inside the same transaction as the review write itself, and then pushes the result to Meilisearch via `updateIndexedRecipeRating`. `createReview` uses a single atomic increment-and-recompute (`UPDATE ... RETURNING`), since an insert's effect on the aggregate is known without reading the table. `updateReview` and `deleteReview` can't be expressed as an increment (a rating *change* isn't a delta of one), so they share `recomputeRecipeRatingStats(recipeId)` in `review.service.ts` — one `UPDATE recipes ... FROM (SELECT count(*), sum(rating) FROM reviews WHERE "recipeId" = $1) ... RETURNING` that recomputes all three columns **from the `Review` table**, and sets `averageRating` back to `NULL` when the last review is removed. Recomputing from source also self-heals any drift as a side effect. Ordering matters: `$transaction([...])` runs its array in order, so the review write is placed first and the aggregate sees the new state. Any future review write path must do the same. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document.
 - `Review.imageUrls` is populated only via `POST`/`DELETE /reviews/:reviewId/images` (Cloudflare R2) — not accepted in the `POST /reviews` body — same pattern as `Recipe.coverImageUrl`/`imageUrls`. See [Review Images (Cloudflare R2)](#review-images-cloudflare-r2).
 - `Report` is **one table for every reportable entity**, not a table per entity. Moderation is inherently cross-entity ("show me the open queue"); three parallel tables would mean three services, three paginators, three OpenAPI blocks, and a manual merge/sort for any admin view. What it deliberately avoids is the usual polymorphic shortcut — a `targetType` plus an untyped `targetId String` — which has no foreign key at all: deleting a recipe would silently orphan its reports, and a typo'd UUID would insert happily. Instead `targetType` records intent for reading, and each reportable entity gets its own **nullable, real FK column** (`recipeId` today; `reviewId`/`reportedUserId` are additive later), each with `onDelete: Cascade`. No join table and no write-time transaction.
 - `Report`'s one-report-per-user rule is `@@unique([recipeId, reporterId])`. PostgreSQL treats NULLs as distinct in a unique index, so rows for other target types (`recipeId = NULL`) never collide with each other — the constraint is naturally scoped per target type, and each new FK column brings its own `@@unique([<fk>, reporterId])`. The `P2002` is caught in `report.service.ts#createRecipeReport` and rethrown as `ApiError.conflict(...)`, same as `createReview`/`followCollection`.
@@ -1208,7 +1271,8 @@ POST /recipes/:recipeId/(cover-image|images)   or   POST /reviews/:reviewId/imag
 - Replacing a cover image deletes the old R2 object.
 - Removing gallery images (`DELETE /recipes/:recipeId/images`) deletes the corresponding R2 objects.
 - `deleteRecipe` fire-and-forget deletes the cover key and every gallery key (the row is loaded before the DB delete, so no bucket `ListObjectsV2` call is needed).
-- Removing review images (`DELETE /reviews/:reviewId/images`) deletes the corresponding R2 objects the same way. There is no `DELETE /reviews/:reviewId` endpoint yet, so there's no cascade-cleanup-on-delete case for reviews.
+- Removing review images (`DELETE /reviews/:reviewId/images`) deletes the corresponding R2 objects the same way.
+- `deleteReview` (`DELETE /reviews/:reviewId`) fire-and-forget deletes every key in the review's `imageUrls` — the row is loaded before the DB delete, same as `deleteRecipe`, so no bucket `ListObjectsV2` call is needed.
 
 ### Package choice
 
@@ -1226,7 +1290,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (323 passing)
+### Unit Tests (340 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1243,8 +1307,8 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/utils/imageUrl.test.ts` | 4 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
-| `tests/unit/reviews/review.service.test.ts` | 25 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
-| `tests/unit/reviews/review.schema.test.ts` | 10 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
+| `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
+| `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
 | `tests/unit/collections/collection.service.test.ts` | 28 | listPublicCollectionsByUser (always public-filtered, user not found), listMyCollections (all public+private for the authenticated owner, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
 | `tests/unit/routers/paramsValidation.test.ts` | 31 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |

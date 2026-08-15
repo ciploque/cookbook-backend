@@ -6,6 +6,13 @@ export const createReviewSchema = z.object({
   content: z.string().max(2000).optional(),
 });
 
+// Full replace (PUT), so `rating` is required and omitting `content` clears it.
+// `imageUrls` stays server-managed via the image routes, same as on create.
+export const updateReviewSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  content: z.string().max(2000).optional(),
+});
+
 export const removeReviewImagesSchema = z.object({
   paths: z.array(z.string().min(1)).min(1).max(10),
 });
@@ -41,6 +48,7 @@ export const recipeReviewsParamsSchema = z.object({
 });
 
 export type CreateReviewInput = z.infer<typeof createReviewSchema>;
+export type UpdateReviewInput = z.infer<typeof updateReviewSchema>;
 export type RemoveReviewImagesInput = z.infer<typeof removeReviewImagesSchema>;
 export type ReviewQuery = z.infer<typeof reviewQuerySchema>;
 export type ReviewFilter = ReviewQuery['filter'];

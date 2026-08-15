@@ -1,7 +1,12 @@
 import { Request, Response } from 'express';
 import { ApiError } from '../../utils/ApiError';
 import * as reviewService from './review.service';
-import { CreateReviewInput, RemoveReviewImagesInput, ReviewQuery } from './review.schema';
+import {
+  CreateReviewInput,
+  RemoveReviewImagesInput,
+  ReviewQuery,
+  UpdateReviewInput,
+} from './review.schema';
 
 export async function listReviewsByRecipe(req: Request, res: Response): Promise<void> {
   const result = await reviewService.listReviewsByRecipe(
@@ -14,6 +19,27 @@ export async function listReviewsByRecipe(req: Request, res: Response): Promise<
 export async function createReview(req: Request, res: Response): Promise<void> {
   const review = await reviewService.createReview(req.user!.sub, req.body as CreateReviewInput);
   res.status(201).json({ success: true, data: review });
+}
+
+export async function getMyReviewForRecipe(req: Request, res: Response): Promise<void> {
+  const review = await reviewService.getMyReviewForRecipe(
+    req.user!.sub,
+    req.params.recipeId as string,
+  );
+  res.json({ success: true, data: review });
+}
+
+export async function updateReview(req: Request, res: Response): Promise<void> {
+  const review = await reviewService.updateReview(
+    req.params.reviewId as string,
+    req.body as UpdateReviewInput,
+  );
+  res.json({ success: true, data: review });
+}
+
+export async function deleteReview(req: Request, res: Response): Promise<void> {
+  await reviewService.deleteReview(req.params.reviewId as string);
+  res.status(204).send();
 }
 
 export async function getRecipeReviewStats(req: Request, res: Response): Promise<void> {
