@@ -10,6 +10,7 @@ vi.mock('../../../src/config/database', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
       groupBy: vi.fn(),
     },
     user: {
@@ -17,6 +18,7 @@ vi.mock('../../../src/config/database', () => ({
     },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
   },
 }));
 
@@ -24,13 +26,21 @@ vi.mock('../../../src/modules/recipes/recipe.search', () => ({
   updateIndexedRecipeRating: vi.fn(),
 }));
 
+vi.mock('../../../src/modules/storage/storage.service', () => ({
+  storeImage: vi.fn(),
+  deleteImage: vi.fn(),
+}));
+
 import { prisma } from '../../../src/config/database';
 import { updateIndexedRecipeRating } from '../../../src/modules/recipes/recipe.search';
+import { deleteImage, storeImage } from '../../../src/modules/storage/storage.service';
 import {
+  addReviewImages,
   listReviewsByRecipe,
   createReview,
   getReviewAuthorId,
   getReviewStats,
+  removeReviewImages,
 } from '../../../src/modules/reviews/review.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -240,7 +250,6 @@ describe('createReview()', () => {
       recipeId: 'recipe-uuid',
       rating: 4,
       content: 'Great recipe!',
-      imageUrls: [],
     });
 
     expect(prisma.review.create).toHaveBeenCalledWith(
@@ -267,7 +276,6 @@ describe('createReview()', () => {
     await createReview('user_author', {
       recipeId: 'recipe-uuid',
       rating: 4,
-      imageUrls: [],
     });
 
     const [strings] = vi.mocked(prisma.$queryRaw).mock.calls[0] as unknown as [readonly string[]];
@@ -287,7 +295,6 @@ describe('createReview()', () => {
     await createReview('user_author', {
       recipeId: 'recipe-uuid',
       rating: 4,
-      imageUrls: [],
     });
 
     expect(updateIndexedRecipeRating).toHaveBeenCalledWith('recipe-uuid', 4.5, 2);
@@ -297,7 +304,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
     await expect(
-      createReview('user_unknown', { recipeId: 'recipe-uuid', rating: 3, imageUrls: [] }),
+      createReview('user_unknown', { recipeId: 'recipe-uuid', rating: 3 }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
 
     expect(prisma.recipe.findUnique).not.toHaveBeenCalled();
@@ -309,7 +316,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(null);
 
     await expect(
-      createReview('user_author', { recipeId: 'missing-id', rating: 3, imageUrls: [] }),
+      createReview('user_author', { recipeId: 'missing-id', rating: 3 }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'RECIPE_NOT_FOUND' });
 
     expect(prisma.review.create).not.toHaveBeenCalled();
@@ -327,7 +334,7 @@ describe('createReview()', () => {
     vi.mocked(prisma.$transaction).mockRejectedValue(p2002);
 
     await expect(
-      createReview('user_author', { recipeId: 'recipe-uuid', rating: 5, imageUrls: [] }),
+      createReview('user_author', { recipeId: 'recipe-uuid', rating: 5 }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 });
@@ -349,5 +356,91 @@ describe('getReviewAuthorId()', () => {
 
     const result = await getReviewAuthorId('missing-id');
     expect(result).toBeNull();
+  });
+});
+
+// ─── addReviewImages ──────────────────────────────────────────────────────────
+
+describe('addReviewImages()', () => {
+  it('throws REVIEW_NOT_FOUND when the review does not exist', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
+
+    await expect(addReviewImages('missing-id', [Buffer.from('x')])).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'REVIEW_NOT_FOUND',
+    });
+
+    expect(storeImage).not.toHaveBeenCalled();
+  });
+
+  it('rejects when adding would exceed the 10-image cap', async () => {
+    const nearFull = { ...mockReview, imageUrls: Array(9).fill('/reviews/review-uuid/gallery/x.jpg') };
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(nearFull as never);
+
+    await expect(
+      addReviewImages('review-uuid', [Buffer.from('a'), Buffer.from('b')]),
+    ).rejects.toMatchObject({ statusCode: 422, code: 'VALIDATION_ERROR' });
+
+    expect(storeImage).not.toHaveBeenCalled();
+  });
+
+  it('stores each buffer under reviews/<id>/gallery then appends via an atomic guarded UPDATE', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(mockReview as never);
+    vi.mocked(storeImage).mockResolvedValue('/reviews/review-uuid/gallery/new.jpg');
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
+
+    await addReviewImages('review-uuid', [Buffer.from('x')]);
+
+    expect(storeImage).toHaveBeenCalledWith(Buffer.from('x'), 'reviews/review-uuid/gallery');
+    // Append is the atomic raw UPDATE, not a read-then-update via review.update.
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.review.update).not.toHaveBeenCalled();
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
+  it('cleans up stored objects and 422s when the atomic guard loses the race', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(mockReview as never);
+    vi.mocked(storeImage).mockResolvedValue('/reviews/review-uuid/gallery/new.jpg');
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(0 as never); // concurrent upload won the cap
+
+    await expect(addReviewImages('review-uuid', [Buffer.from('x')])).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'VALIDATION_ERROR',
+    });
+
+    expect(deleteImage).toHaveBeenCalledWith('/reviews/review-uuid/gallery/new.jpg');
+  });
+});
+
+// ─── removeReviewImages ───────────────────────────────────────────────────────
+
+describe('removeReviewImages()', () => {
+  it('throws REVIEW_NOT_FOUND when the review does not exist', async () => {
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(null);
+
+    await expect(removeReviewImages('missing-id', ['a.jpg'])).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'REVIEW_NOT_FOUND',
+    });
+  });
+
+  it('removes the given paths from imageUrls and deletes them from storage', async () => {
+    const withImages = {
+      ...mockReview,
+      imageUrls: ['/reviews/review-uuid/gallery/a.jpg', '/reviews/review-uuid/gallery/b.jpg'],
+    };
+    vi.mocked(prisma.review.findUnique).mockResolvedValue(withImages as never);
+    vi.mocked(prisma.review.update).mockResolvedValue(mockReview as never);
+
+    await removeReviewImages('review-uuid', ['/reviews/review-uuid/gallery/b.jpg']);
+
+    expect(deleteImage).toHaveBeenCalledWith('/reviews/review-uuid/gallery/b.jpg');
+    expect(deleteImage).not.toHaveBeenCalledWith('/reviews/review-uuid/gallery/a.jpg');
+    expect(prisma.review.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'review-uuid' },
+        data: { imageUrls: ['/reviews/review-uuid/gallery/a.jpg'] },
+      }),
+    );
   });
 });

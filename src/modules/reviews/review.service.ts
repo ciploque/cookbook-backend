@@ -3,6 +3,7 @@ import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { updateIndexedRecipeRating } from '../recipes/recipe.search';
+import { deleteImage, storeImage } from '../storage/storage.service';
 import { CreateReviewInput, ReviewFilter, ReviewOrder, ReviewQuery } from './review.schema';
 
 const reviewInclude = {
@@ -10,6 +11,7 @@ const reviewInclude = {
 } satisfies Prisma.ReviewInclude;
 
 const RATING_VALUES = [1, 2, 3, 4, 5] as const;
+const MAX_REVIEW_IMAGES = 10;
 
 function buildReviewWhere(recipeId: string, filter?: ReviewFilter): Prisma.ReviewWhereInput {
   if (filter === 'media') {
@@ -117,7 +119,7 @@ export async function createReview(authProviderId: string, input: CreateReviewIn
           authorId: author.id,
           rating: input.rating,
           content: input.content,
-          imageUrls: input.imageUrls ?? [],
+          imageUrls: [],
         },
         include: reviewInclude,
       }),
@@ -147,4 +149,65 @@ export async function getReviewAuthorId(reviewId: string): Promise<string | null
     include: { author: { select: { authProviderId: true } } },
   });
   return review?.author.authProviderId ?? null;
+}
+
+export async function addReviewImages(reviewId: string, buffers: Buffer[]) {
+  const existing = await prisma.review.findUnique({
+    where: { id: reviewId },
+    select: { imageUrls: true },
+  });
+  if (!existing) throw ApiError.notFound('Review');
+
+  const capMessage = (current: number) =>
+    `Maximum of ${MAX_REVIEW_IMAGES} images allowed per review ` +
+    `(currently ${current}, tried to add ${buffers.length})`;
+
+  // Fast path: reject an obvious over-cap before spending R2 writes.
+  if (existing.imageUrls.length + buffers.length > MAX_REVIEW_IMAGES) {
+    throw ApiError.validation({ images: [capMessage(existing.imageUrls.length)] });
+  }
+
+  const newKeys = await Promise.all(
+    buffers.map((buffer) => storeImage(buffer, `reviews/${reviewId}/gallery`)),
+  );
+
+  // Atomic, race-safe capped append: the cap lives in the WHERE clause, so concurrent uploads
+  // can neither exceed it nor lose each other's writes (unlike a read-then-update round-trip).
+  const affected = await prisma.$executeRaw(Prisma.sql`
+    UPDATE "reviews"
+    SET "imageUrls" = "imageUrls" || ARRAY[${Prisma.join(newKeys)}]::text[]
+    WHERE "id" = ${reviewId}::uuid
+      AND cardinality("imageUrls") + ${newKeys.length} <= ${MAX_REVIEW_IMAGES}
+  `);
+
+  if (affected === 0) {
+    // Lost the race against a concurrent upload — undo the just-stored objects to avoid orphans.
+    newKeys.forEach((key) => void deleteImage(key));
+    throw ApiError.validation({ images: [capMessage(MAX_REVIEW_IMAGES)] });
+  }
+
+  const review = await prisma.review.findUnique({
+    where: { id: reviewId },
+    include: reviewInclude,
+  });
+  if (!review) throw ApiError.notFound('Review');
+
+  return formatReview(review);
+}
+
+export async function removeReviewImages(reviewId: string, paths: string[]) {
+  const existing = await prisma.review.findUnique({ where: { id: reviewId } });
+  if (!existing) throw ApiError.notFound('Review');
+
+  const toRemove = new Set(paths);
+  const remaining = existing.imageUrls.filter((key) => !toRemove.has(key));
+  existing.imageUrls.filter((key) => toRemove.has(key)).forEach((key) => void deleteImage(key));
+
+  const review = await prisma.review.update({
+    where: { id: reviewId },
+    data: { imageUrls: remaining },
+    include: reviewInclude,
+  });
+
+  return formatReview(review);
 }

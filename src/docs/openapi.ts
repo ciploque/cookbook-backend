@@ -9,7 +9,11 @@ import {
   removeGalleryImagesSchema,
 } from '../modules/recipes/recipe.schema';
 import { provisionUserSchema, updateUserSchema } from '../modules/users/user.schema';
-import { createReviewSchema, reviewQuerySchema } from '../modules/reviews/review.schema';
+import {
+  createReviewSchema,
+  removeReviewImagesSchema,
+  reviewQuerySchema,
+} from '../modules/reviews/review.schema';
 import {
   createCollectionSchema,
   updateCollectionSchema,
@@ -172,6 +176,10 @@ const RemoveGalleryImagesBody = registry.register(
 const ProvisionUserBody = registry.register('ProvisionUserBody', provisionUserSchema);
 const UpdateUserBody = registry.register('UpdateUserBody', updateUserSchema);
 const CreateReviewBody = registry.register('CreateReviewBody', createReviewSchema);
+const RemoveReviewImagesBody = registry.register(
+  'RemoveReviewImagesBody',
+  removeReviewImagesSchema,
+);
 
 const ReviewStatsSchema = registry.register(
   'ReviewStats',
@@ -897,6 +905,94 @@ registry.registerPath({
     },
     409: {
       description: 'Already reviewed this recipe',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/reviews/{reviewId}/images',
+  tags: ['Reviews'],
+  summary: 'Add review images',
+  description:
+    'Uploads one or more images (multipart/form-data, field "images"; JPEG/PNG/WEBP/GIF, max 5MB each) to ' +
+    'Cloudflare R2 and appends them to the review. Capped at 10 images total.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ reviewId: z.string().uuid() }),
+    body: {
+      content: {
+        'multipart/form-data': {
+          schema: {
+            type: 'object',
+            properties: {
+              images: { type: 'array', items: { type: 'string', format: 'binary' } },
+            },
+            required: ['images'],
+          },
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: 'Updated review with the new images appended',
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the review author',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Review not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Missing/invalid files, wrong type/size, or images would exceed the cap of 10',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'delete',
+  path: '/api/v1/reviews/{reviewId}/images',
+  tags: ['Reviews'],
+  summary: 'Remove review images',
+  description: 'Removes the given relative storage paths from the review and deletes them from R2.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ reviewId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: RemoveReviewImagesBody } } },
+  },
+  responses: {
+    200: {
+      description: 'Updated review with the given images removed',
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReviewSchema }) },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Not the review author',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Review not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
     422: {

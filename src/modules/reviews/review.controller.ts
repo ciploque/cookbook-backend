@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
+import { ApiError } from '../../utils/ApiError';
 import * as reviewService from './review.service';
-import { CreateReviewInput, ReviewQuery } from './review.schema';
+import { CreateReviewInput, RemoveReviewImagesInput, ReviewQuery } from './review.schema';
 
 export async function listReviewsByRecipe(req: Request, res: Response): Promise<void> {
   const result = await reviewService.listReviewsByRecipe(
@@ -18,4 +19,23 @@ export async function createReview(req: Request, res: Response): Promise<void> {
 export async function getRecipeReviewStats(req: Request, res: Response): Promise<void> {
   const stats = await reviewService.getReviewStats(req.params.recipeId as string);
   res.json({ success: true, data: stats });
+}
+
+export async function addReviewImages(req: Request, res: Response): Promise<void> {
+  const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+  if (files.length === 0) throw ApiError.validation({ images: ['No image files were provided'] });
+
+  const review = await reviewService.addReviewImages(
+    req.params.reviewId as string,
+    files.map((file) => file.buffer),
+  );
+  res.json({ success: true, data: review });
+}
+
+export async function removeReviewImages(req: Request, res: Response): Promise<void> {
+  const review = await reviewService.removeReviewImages(
+    req.params.reviewId as string,
+    (req.body as RemoveReviewImagesInput).paths,
+  );
+  res.json({ success: true, data: review });
 }

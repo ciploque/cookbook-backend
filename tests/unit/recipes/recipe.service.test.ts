@@ -15,6 +15,7 @@ vi.mock('../../../src/config/database', () => ({
       findUnique: vi.fn(),
     },
     $transaction: vi.fn(),
+    $executeRaw: vi.fn(),
   },
 }));
 
@@ -629,24 +630,24 @@ describe('addGalleryImages()', () => {
     });
   });
 
-  it('appends stored keys to the existing gallery', async () => {
+  it('stores keys then appends them via an atomic guarded UPDATE', async () => {
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg'],
     } as never);
     vi.mocked(storeImage).mockResolvedValueOnce('/recipes/recipe-uuid/gallery/b.jpg');
-    vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
 
     await addGalleryImages('recipe-uuid', [Buffer.from('x')]);
 
-    expect(prisma.recipe.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg', '/recipes/recipe-uuid/gallery/b.jpg'] },
-      }),
-    );
+    expect(storeImage).toHaveBeenCalledWith(Buffer.from('x'), 'recipes/recipe-uuid/gallery');
+    // Append is the atomic raw UPDATE, not a read-then-update via recipe.update.
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.recipe.update).not.toHaveBeenCalled();
+    expect(deleteImage).not.toHaveBeenCalled();
   });
 
-  it('rejects when the gallery would exceed 10 images', async () => {
+  it('rejects (fast path) without storing when the gallery would exceed 10 images', async () => {
     const existingKeys = Array.from({ length: 9 }, (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
@@ -658,7 +659,7 @@ describe('addGalleryImages()', () => {
     ).rejects.toMatchObject({ statusCode: 422, code: 'VALIDATION_ERROR' });
 
     expect(storeImage).not.toHaveBeenCalled();
-    expect(prisma.recipe.update).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('allows exactly reaching the 10-image cap', async () => {
@@ -668,11 +669,28 @@ describe('addGalleryImages()', () => {
       imageUrls: existingKeys,
     } as never);
     vi.mocked(storeImage).mockResolvedValue('/recipes/recipe-uuid/gallery/new.jpg');
-    vi.mocked(prisma.recipe.update).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
 
     await addGalleryImages('recipe-uuid', [Buffer.from('x')]);
 
-    expect(prisma.recipe.update).toHaveBeenCalled();
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans up stored objects and 422s when the atomic guard loses the race', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
+      ...mockRecipeFull,
+      imageUrls: ['/recipes/recipe-uuid/gallery/a.jpg'],
+    } as never);
+    vi.mocked(storeImage).mockResolvedValueOnce('/recipes/recipe-uuid/gallery/b.jpg');
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(0 as never); // concurrent upload won the cap
+
+    await expect(addGalleryImages('recipe-uuid', [Buffer.from('x')])).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'VALIDATION_ERROR',
+    });
+
+    // Orphan cleanup: the just-stored object is deleted from R2.
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/b.jpg');
   });
 });
 

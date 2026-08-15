@@ -20,6 +20,24 @@ export function errorHandler(
     return;
   }
 
+  // body-parser (express.json) errors carry a `type` discriminator. Map the common ones to
+  // their proper status instead of letting them fall through to a generic 500.
+  const bodyParserType = (err as { type?: unknown })?.type;
+  if (bodyParserType === 'entity.too.large') {
+    res.status(413).json({
+      success: false,
+      error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body too large', details: null },
+    });
+    return;
+  }
+  if (bodyParserType === 'entity.parse.failed') {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_JSON', message: 'Malformed JSON in request body', details: null },
+    });
+    return;
+  }
+
   const message = env.NODE_ENV === 'production' ? 'Internal server error' : String(err);
 
   res.status(500).json({

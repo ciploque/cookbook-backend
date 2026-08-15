@@ -42,7 +42,8 @@ Verify: `GET http://localhost:3001/health` → `{ "status": "ok", "db": "connect
 cookbook-backend/
 ├── src/
 │   ├── config/
-│   │   ├── env.ts              # Zod-validated env vars, exported as typed config object; exits on missing vars
+│   │   ├── env.ts              # Zod-validated env vars, exported as typed config object; exits on missing vars (and on ALLOWED_ORIGINS=* in production, via envGuards)
+│   │   ├── envGuards.ts        # Pure, side-effect-free env guards (assertProductionOrigins) — kept separate from env.ts so they're unit-testable without triggering the load-time exit
 │   │   ├── database.ts         # Prisma client singleton
 │   │   ├── clerk.ts            # (removed — @clerk/express reads CLERK_SECRET_KEY from env automatically)
 │   │   ├── r2.ts                # Cloudflare R2 (S3-compatible) client singleton + R2_BUCKET_NAME constant
@@ -51,10 +52,10 @@ cookbook-backend/
 │   ├── middlewares/
 │   │   ├── authenticate.ts     # authenticate() — Clerk JWT verification via getAuth(); dev bypass via x-dev-user-sub; returns 401 on failure. optionalAuthenticate() — same resolution, but never rejects; populates req.user only if a valid session is present
 │   │   ├── authorize.ts        # Ownership guard factory — verifies req.user.sub === resource owner authProviderId. Only a resolved `null` (resource genuinely absent) maps to 404; an unexpected error from the lookup propagates to asyncHandler → 500, it is not swallowed
-│   │   ├── validate.ts         # Zod middleware factory (body / query / params)
+│   │   ├── validate.ts         # Zod middleware factory (body / query / params); also rejects NUL bytes (0x00) in any validated string → 422
 │   │   ├── upload.ts            # multer memory-storage configs (uploadSingleImage / uploadImagesArray); translates multer errors to ApiError
 │   │   ├── verifyClerkWebhook.ts # Verifies Clerk webhook signature (svix headers); sets req.clerkEvent
-│   │   ├── errorHandler.ts     # Global Express error handler; maps ApiError → JSON; unknown → 500
+│   │   ├── errorHandler.ts     # Global Express error handler; maps ApiError → JSON; body-parser errors → 413 (entity.too.large) / 400 (entity.parse.failed); unknown → 500
 │   │   └── requestLogger.ts    # pino-http request logger with pino-pretty in development
 │   ├── modules/
 │   │   ├── users/
@@ -72,7 +73,7 @@ cookbook-backend/
 │   │   │   ├── review.router.ts
 │   │   │   ├── review.controller.ts
 │   │   │   ├── review.service.ts
-│   │   │   └── review.schema.ts       # Zod schemas; rating: 1–5 int; imageUrls: optional array
+│   │   │   └── review.schema.ts       # Zod schemas; rating: 1–5 int; removeReviewImagesSchema
 │   │   ├── collections/
 │   │   │   ├── collection.router.ts
 │   │   │   ├── collection.controller.ts
@@ -180,12 +181,13 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 | `NODE_ENV` | yes | — | `development` \| `test` \| `production` |
 | `PORT` | no | `3000` | HTTP server port |
 | `API_BASE_PATH` | no | `/api` | Base path — the code appends `/v1` per router, so set this to `/api` not `/api/v1` |
+| `TRUST_PROXY` | no | `1` | Number of trusted reverse-proxy hops passed to `app.set('trust proxy', …)`. Must match the real deployment topology so rate limiting keys off the true client IP, not a spoofable `X-Forwarded-For` — see [Rate Limiting](#rate-limiting). Set `0` when the app is directly reachable (no proxy) to ignore `X-Forwarded-For` entirely. |
 | `DATABASE_URL` | yes | — | PostgreSQL connection string |
 | `CLERK_SECRET_KEY` | yes | — | Clerk secret key from the Clerk dashboard → API Keys |
 | `CLERK_PUBLISHABLE_KEY` | no | — | Clerk publishable key (optional for pure backend) |
 | `CLERK_WEBHOOK_SIGNING_SECRET` | yes | — | Clerk dashboard → Webhooks → Signing Secret (`whsec_...`); verifies `POST /webhooks/clerk` |
-| `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins |
-| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in the remaining raw-URL image fields: `RecipeStep.imageUrl`, `Review.imageUrls`, and `User.avatarUrl` (enforced via `trustedImageUrlSchema` in `src/utils/imageUrl.ts`). Recipe cover/gallery images instead go through the R2 upload endpoints, not a raw URL field. These fields are always `https:`-only regardless of this var — that check is unconditional, not part of the allowlist. Empty/unset → no domain allowlist, any `https:` URL is accepted; non-`https:` schemes (`javascript:`, `data:`, etc.) are always rejected. |
+| `ALLOWED_ORIGINS` | yes | — | Comma-separated CORS origins. `*` reflects any origin (with `credentials: true`) — allowed in dev/test only; `env.ts` **refuses to boot** if `ALLOWED_ORIGINS=*` while `NODE_ENV=production` (guarded by `assertProductionOrigins` in `src/config/envGuards.ts`). Set an explicit allowlist in production. |
+| `TRUSTED_IMAGE_DOMAINS` | no | — | Comma-separated hostnames allowed in the remaining raw-URL image fields: `RecipeStep.imageUrl` and `User.avatarUrl` (enforced via `trustedImageUrlSchema` in `src/utils/imageUrl.ts`). Recipe cover/gallery images and review images instead go through the R2 upload endpoints, not a raw URL field. These fields are always `https:`-only regardless of this var — that check is unconditional, not part of the allowlist. Empty/unset → no domain allowlist, any `https:` URL is accepted; non-`https:` schemes (`javascript:`, `data:`, etc.) are always rejected. |
 | `R2_ACCOUNT_ID` | yes | — | Cloudflare account id; builds the R2 S3-compatible endpoint `https://<id>.r2.cloudflarestorage.com` |
 | `R2_ACCESS_KEY_ID` | yes | — | R2 API token access key (Dashboard → R2 → Manage API Tokens) |
 | `R2_SECRET_ACCESS_KEY` | yes | — | R2 API token secret key |
@@ -267,7 +269,9 @@ Two ways to hit protected routes during development:
 
 ## Rate Limiting
 
-`app.set('trust proxy', 1)` is set in `createApp()` (before any middleware) so `express-rate-limit` reads the real client IP from `X-Forwarded-For` instead of the proxy's IP — required for per-client throttling to work at all behind nginx/Cloudflare/an ELB. Bump to `2`+ if a second proxy hop is added in front.
+`app.set('trust proxy', env.TRUST_PROXY)` is set in `createApp()` (before any middleware) so `express-rate-limit` reads the real client IP from `X-Forwarded-For` instead of the proxy's IP — required for per-client throttling to work at all behind nginx/Cloudflare/an ELB. `TRUST_PROXY` defaults to `1` (one trusted hop); set it to the actual number of proxy hops in front of the app.
+
+**Security caveat:** `trust proxy` must match the real topology exactly. If the app is reachable *without* a proxy that overwrites `X-Forwarded-For` (direct access, or more hops than configured), a client can spoof `X-Forwarded-For` to land in a fresh limiter bucket every request and bypass all rate limits. Set `TRUST_PROXY=0` when the app is directly internet-reachable so the header is ignored and the real socket IP is used.
 
 Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 
@@ -275,7 +279,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike) |
 | `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter), plus the cross-module GET routes: `recipeReviewsRouter`, `userRecipesRouter`, `userCollectionsRouter` |
-| `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter` (stricter than `readLimiter` since image uploads are heavier) |
+| `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
 
@@ -526,7 +530,7 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 
 **No full URLs:** `coverImageUrl`/`imageUrls` in every recipe API response are relative paths with a leading `/` (e.g. `/recipes/<id>/cover/<uuid>.jpg`), never a full `https://` URL. The frontend prepends its own base/CDN URL. `DELETE /recipes/:recipeId/images` expects `paths` to be the exact leading-slash values as returned in `imageUrls`.
 
-`RecipeStep.imageUrl` (per-step images) is unchanged — still a raw URL field, not part of this pipeline, but now validated against `TRUSTED_IMAGE_DOMAINS` via `trustedImageUrlSchema` (see [Environment Variables](#environment-variables)). `Review.imageUrls` and `User.avatarUrl` use the same schema — `avatarUrl` is no longer a bare `z.string().url()`, since that only checks the string parses as a URL and does not restrict the scheme (`javascript:`/`data:` URIs pass it). `trustedImageUrlSchema` always requires `https:` (unconditionally, independent of whether `TRUSTED_IMAGE_DOMAINS` is configured) on top of the optional domain allowlist. `provisionFromWebhook` (`user.service.ts`) validates Clerk's `image_url` the same way before writing it, since that path bypasses the Zod schema.
+`RecipeStep.imageUrl` (per-step images) is unchanged — still a raw URL field, not part of this pipeline, but now validated against `TRUSTED_IMAGE_DOMAINS` via `trustedImageUrlSchema` (see [Environment Variables](#environment-variables)). `User.avatarUrl` uses the same schema — `avatarUrl` is no longer a bare `z.string().url()`, since that only checks the string parses as a URL and does not restrict the scheme (`javascript:`/`data:` URIs pass it). `trustedImageUrlSchema` always requires `https:` (unconditionally, independent of whether `TRUSTED_IMAGE_DOMAINS` is configured) on top of the optional domain allowlist. `provisionFromWebhook` (`user.service.ts`) validates Clerk's `image_url` the same way before writing it, since that path bypasses the Zod schema. `Review.imageUrls` no longer accepts raw URLs at all — it now follows this R2 upload pipeline instead, same as recipe images (see [Review Images (Cloudflare R2)](#review-images-cloudflare-r2)).
 
 ---
 
@@ -537,6 +541,8 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 | GET | `/recipes/:recipeId/reviews` | Public | Paginated reviews for a recipe |
 | GET | `/recipes/:recipeId/reviews/summary` | Public | Totalized rating breakdown + media count for a recipe's reviews |
 | POST | `/reviews` | Required | Create a review |
+| POST | `/reviews/:reviewId/images` | Required + Owner | Add review images (multipart, field `images`, up to 10 files per request) |
+| DELETE | `/reviews/:reviewId/images` | Required + Owner | Remove review images by relative path |
 
 #### GET /recipes/:recipeId/reviews — Query Parameters
 
@@ -574,12 +580,24 @@ no new index needed.
 {
   "recipeId": "uuid (required)",
   "rating": "number (required, integer 1–5)",
-  "content": "string (optional, max 2000)",
-  "imageUrls": ["string (optional, https urls, max 10 items, hostname must be in TRUSTED_IMAGE_DOMAINS if configured)"]
+  "content": "string (optional, max 2000)"
 }
 ```
 
+**`imageUrls` is not part of this body.** It's server-managed, same as `Recipe.coverImageUrl`/`imageUrls`: create the review first, then upload images against its id via `POST /reviews/:reviewId/images`. A new review is created with `imageUrls: []`.
+
 **Errors:** `404 RECIPE_NOT_FOUND` if recipe does not exist. `409 CONFLICT` if the authenticated user has already reviewed this recipe. One review per user per recipe is enforced by a DB unique constraint.
+
+#### Review Images (Cloudflare R2)
+
+Same pipeline as [Recipe Cover & Gallery Images](#recipe-cover--gallery-images-cloudflare-r2--phase-2) — see [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage) for the shared mechanics.
+
+| Method | Path | Field(s) | Notes |
+|---|---|---|---|
+| POST | `/reviews/:reviewId/images` | `images` (up to 10 files) | Appends to the review's images; **422** if it would exceed 10 images total |
+| DELETE | `/reviews/:reviewId/images` | JSON body `{ "paths": ["/reviews/<id>/gallery/<uuid>.jpg"] }` | Removes the given relative paths; deletes the R2 objects |
+
+Both require `authenticate` + an owner guard (`req.user.sub` must match the review's author, same `authorize()` factory as recipes) and the same stricter `uploadLimiter` (30 requests / 15 min) recipes use for image routes — stacked on top of the `writeLimiter` this router is otherwise mounted under (see [Rate Limiting](#rate-limiting)). Images are stored under `reviews/<reviewId>/gallery/<uuid>.jpg`. There is currently no `DELETE /reviews/:reviewId` endpoint, so unlike recipe delete there is no cascade image-cleanup-on-delete case yet.
 
 #### Review Object Shape
 
@@ -682,8 +700,10 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
 | `RECIPE_NOT_FOUND` | 404 | Recipe record not found |
 | `REVIEW_NOT_FOUND` | 404 | Review record not found |
 | `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
-| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation |
+| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation (also raised for a NUL byte (`0x00`) in any validated string — rejected centrally in `validate.ts` since PostgreSQL `text` can't store it) |
 | `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
+| `PAYLOAD_TOO_LARGE` | 413 | Request body exceeds the `express.json` size limit (body-parser `entity.too.large`, mapped in `errorHandler.ts`) |
+| `INVALID_JSON` | 400 | Malformed JSON in the request body (body-parser `entity.parse.failed`) |
 | `INVALID_WEBHOOK_SIGNATURE` | 400 | `POST /webhooks/clerk` signature verification failed (bad/missing svix headers or secret mismatch) |
 | `INTERNAL_ERROR` | 500 | Unhandled server error |
 
@@ -885,6 +905,7 @@ model CollectionFollower {
 - `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2. Both `createRecipeSchema.category` and `recipeQuerySchema.category` lowercase/trim the value at the Zod layer (`.trim().toLowerCase()`), so `listRecipes` can filter with a plain equality match against `@@index([category])`. Prisma's `mode: 'insensitive'` was deliberately avoided here — it compiles to a case-insensitive comparison (`ILIKE`/`LOWER()`-equivalent) that a plain B-tree index can't satisfy, forcing a sequential scan as the table grows. If you ever add a raw SQL path that writes `category` directly (bypassing the schema), normalize it the same way.
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
 - `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. `POST /reviews` is currently the only write path for reviews (no update/delete route exists), so the stat update in `review.service.ts#createReview` is a simple atomic increment-and-recompute (single `UPDATE ... RETURNING`) inside the same transaction as the review insert, with no decrement/recompute-on-delete case to handle yet. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document. If a delete/update review endpoint is added later, its handler must recompute (not just decrement) `averageRating`/`ratingSum`/`reviewCount` from the `Review` table for that recipe.
+- `Review.imageUrls` is populated only via `POST`/`DELETE /reviews/:reviewId/images` (Cloudflare R2) — not accepted in the `POST /reviews` body — same pattern as `Recipe.coverImageUrl`/`imageUrls`. See [Review Images (Cloudflare R2)](#review-images-cloudflare-r2).
 
 ---
 
@@ -1005,19 +1026,19 @@ Meilisearch runs as a service in `docker/docker-compose.yml` on port `7700`. The
 
 ## Cloudflare R2 Image Storage
 
-Generic, provider-agnostic image storage — currently used for recipe cover/gallery images, designed to be reused by other modules (avatars, reviews) later without rework. Postgres stores (and the API returns) only a **relative path with a leading `/`**; the backend never builds a full URL — the storage provider can change, and the frontend's base/CDN URL can change, without touching stored data or the API contract.
+Generic, provider-agnostic image storage — used for recipe cover/gallery images and review images, designed to be reused by other modules (e.g. avatars) later without rework. Postgres stores (and the API returns) only a **relative path with a leading `/`**; the backend never builds a full URL — the storage provider can change, and the frontend's base/CDN URL can change, without touching stored data or the API contract.
 
 ### Pipeline
 
 ```
-POST /recipes/:recipeId/(cover-image|images)
+POST /recipes/:recipeId/(cover-image|images)   or   POST /reviews/:reviewId/images
   └─> upload.ts middleware        multer memoryStorage — buffers the file(s), cheap mimetype prefilter, 5MB limit, translates multer errors to ApiError/422
-        └─> recipe.service.ts     ownership already verified by authorize(); enforces the 10-image gallery cap
+        └─> recipe.service.ts / review.service.ts   ownership already verified by authorize(); enforces the 10-image cap atomically (see note below)
               └─> storage.service.ts#storeImage
                     ├─> imageSignature.ts#detectImageType   magic-byte check (JPEG/PNG/WEBP/GIF) — the real validation, not the client-declared Content-Type
-                    ├─> r2Client.send(PutObjectCommand)      real R2 key (no leading slash): `<folder>/<uuid>.<ext>`, e.g. recipes/<id>/cover/<uuid>.jpg
+                    ├─> r2Client.send(PutObjectCommand)      real R2 key (no leading slash): `<folder>/<uuid>.<ext>`, e.g. recipes/<id>/cover/<uuid>.jpg or reviews/<id>/gallery/<uuid>.jpg
                     └─> returns buildImageUrl(key)           leading-slash path, e.g. /recipes/<id>/cover/<uuid>.jpg
-              recipe.<coverImageUrl|imageUrls> updated with the returned path(s)
+              recipe.<coverImageUrl|imageUrls> / review.imageUrls updated with the returned path(s)
 ```
 
 ### `src/modules/storage/storage.service.ts`
@@ -1030,9 +1051,11 @@ POST /recipes/:recipeId/(cover-image|images)
 
 ### Cleanup
 
+- Adding gallery/review images (`addGalleryImages`/`addReviewImages`) appends via a single atomic `UPDATE … SET imageUrls = imageUrls || … WHERE cardinality(imageUrls) + n <= 10` (built with `prisma.$executeRaw` + `Prisma.join`, so each key is a bound param). This is race-safe: concurrent uploads can neither exceed the cap nor lose each other's writes. If the guard's `WHERE` rejects the append (a concurrent upload won the cap), the just-stored R2 objects are deleted so they don't orphan, and the request gets a `422`. A cheap pre-check still short-circuits the obvious over-cap/not-found case before spending R2 writes.
 - Replacing a cover image deletes the old R2 object.
 - Removing gallery images (`DELETE /recipes/:recipeId/images`) deletes the corresponding R2 objects.
 - `deleteRecipe` fire-and-forget deletes the cover key and every gallery key (the row is loaded before the DB delete, so no bucket `ListObjectsV2` call is needed).
+- Removing review images (`DELETE /reviews/:reviewId/images`) deletes the corresponding R2 objects the same way. There is no `DELETE /reviews/:reviewId` endpoint yet, so there's no cascade-cleanup-on-delete case for reviews.
 
 ### Package choice
 
@@ -1050,7 +1073,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (201 passing)
+### Unit Tests (271 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1060,18 +1083,21 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
 | `tests/unit/users/user.service.test.ts` | 28 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 36 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `category` plain-equality filter, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, 10-image gallery cap, image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
+| `tests/unit/recipes/recipe.service.test.ts` | 37 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, Meilisearch delegation when `q` present, `category` plain-equality filter, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
 | `tests/unit/recipes/recipe.schema.test.ts` | 5 | `category` lowercased/trimmed on both write (`createRecipeSchema`) and filter (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs |
 | `tests/unit/recipes/recipe.search.test.ts` | 11 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping (page/hitsPerPage, exact `totalHits`), `minRating` filter clause, filter string escaping for `category`/tag slugs, `updateIndexedRecipeRating` partial document sync |
 | `tests/unit/storage/storage.service.test.ts` | 6 | `storeImage` (returns leading-slash path, uploads to R2 with the unprefixed key, invalid content rejected via `ApiError.validation`), `deleteImage` (strips leading slash before the R2 call), `buildImageUrl` |
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/utils/imageUrl.test.ts` | 4 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
-| `tests/unit/reviews/review.service.test.ts` | 18 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count) |
-| `tests/unit/reviews/review.schema.test.ts` | 8 | `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
+| `tests/unit/reviews/review.service.test.ts` | 25 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
+| `tests/unit/reviews/review.schema.test.ts` | 10 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
 | `tests/unit/collections/collection.service.test.ts` | 28 | listPublicCollectionsByUser (always public-filtered, user not found), listMyCollections (all public+private for the authenticated owner, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
+| `tests/unit/middlewares/validate.test.ts` | 5 | Valid input passes + unknown keys stripped; schema failure → 422; NUL byte (`0x00`) rejected → 422 at top level, nested in arrays/objects, and in query params |
+| `tests/unit/middlewares/errorHandler.test.ts` | 4 | `ApiError` passthrough (status/code/details); body-parser `entity.too.large` → 413 `PAYLOAD_TOO_LARGE`; `entity.parse.failed` → 400 `INVALID_JSON`; unknown error → generic 500 (message hidden in production) |
+| `tests/unit/config/envGuards.test.ts` | 3 | `assertProductionOrigins` — rejects `*` in production (trimmed), allows an explicit allowlist, allows `*` in dev/test |
 | `tests/unit/middlewares/verifyClerkWebhook.test.ts` | 2 | Attaches verified event to `req.clerkEvent` on success; 400 `INVALID_WEBHOOK_SIGNATURE` on verification failure |
 | `tests/unit/webhooks/clerk.webhook.controller.test.ts` | 6 | user.created (primary email selection, fallback to first email), user.deleted (with/without id), user.updated (no-op/logged), unhandled event types |
 | `tests/unit/docs/openapi.test.ts` | 1 | Every Express route has a matching OpenAPI spec entry |
@@ -1220,3 +1246,4 @@ Both run via `docker/docker-compose.yml`.
 - [x] Old R2 objects cleaned up on cover replace, gallery image removal, and recipe delete
 - [x] Documented in OpenAPI spec (`src/docs/openapi.ts`)
 - [x] Unit tests: storage service, image signature detection, recipe service upload/delete/cap-enforcement paths
+- [x] `POST`/`DELETE /reviews/:reviewId/images` — the "reviews" case of the storage service's planned reusability realized; `imageUrls` removed from `POST /reviews` body, capped at 10 images total, owner-only, rate-limited

@@ -4,7 +4,26 @@ vi.mock('../../../src/config/env', () => ({
   trustedImageDomains: [] as string[],
 }));
 
-import { reviewQuerySchema } from '../../../src/modules/reviews/review.schema';
+import { createReviewSchema, reviewQuerySchema } from '../../../src/modules/reviews/review.schema';
+
+describe('createReviewSchema', () => {
+  it('parses a body without imageUrls', () => {
+    const result = createReviewSchema.safeParse({
+      recipeId: '123e4567-e89b-12d3-a456-426614174000',
+      rating: 4,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('strips an imageUrls field if passed — the schema no longer defines it', () => {
+    const result = createReviewSchema.parse({
+      recipeId: '123e4567-e89b-12d3-a456-426614174000',
+      rating: 4,
+      imageUrls: ['https://example.com/a.jpg'],
+    });
+    expect(result).not.toHaveProperty('imageUrls');
+  });
+});
 
 describe('reviewQuerySchema — filter', () => {
   it('accepts each rating:N value', () => {

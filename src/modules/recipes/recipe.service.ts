@@ -340,27 +340,45 @@ export async function deleteCoverImage(recipeId: string) {
 }
 
 export async function addGalleryImages(recipeId: string, buffers: Buffer[]) {
-  const existing = await prisma.recipe.findUnique({ where: { id: recipeId } });
+  const existing = await prisma.recipe.findUnique({
+    where: { id: recipeId },
+    select: { imageUrls: true },
+  });
   if (!existing) throw ApiError.notFound('Recipe');
 
+  const capMessage = (current: number) =>
+    `Maximum of ${MAX_GALLERY_IMAGES} images allowed in gallery ` +
+    `(currently ${current}, tried to add ${buffers.length})`;
+
+  // Fast path: reject an obvious over-cap before spending R2 writes.
   if (existing.imageUrls.length + buffers.length > MAX_GALLERY_IMAGES) {
-    throw ApiError.validation({
-      images: [
-        `Maximum of ${MAX_GALLERY_IMAGES} images allowed in gallery ` +
-          `(currently ${existing.imageUrls.length}, tried to add ${buffers.length})`,
-      ],
-    });
+    throw ApiError.validation({ images: [capMessage(existing.imageUrls.length)] });
   }
 
   const newKeys = await Promise.all(
     buffers.map((buffer) => storeImage(buffer, `recipes/${recipeId}/gallery`)),
   );
 
-  const recipe = await prisma.recipe.update({
+  // Atomic, race-safe capped append: the cap lives in the WHERE clause, so concurrent uploads
+  // can neither exceed it nor lose each other's writes (unlike a read-then-update round-trip).
+  const affected = await prisma.$executeRaw(Prisma.sql`
+    UPDATE "recipes"
+    SET "imageUrls" = "imageUrls" || ARRAY[${Prisma.join(newKeys)}]::text[]
+    WHERE "id" = ${recipeId}::uuid
+      AND cardinality("imageUrls") + ${newKeys.length} <= ${MAX_GALLERY_IMAGES}
+  `);
+
+  if (affected === 0) {
+    // Lost the race against a concurrent upload — undo the just-stored objects to avoid orphans.
+    newKeys.forEach((key) => void deleteImage(key));
+    throw ApiError.validation({ images: [capMessage(MAX_GALLERY_IMAGES)] });
+  }
+
+  const recipe = await prisma.recipe.findUnique({
     where: { id: recipeId },
-    data: { imageUrls: [...existing.imageUrls, ...newKeys] },
     include: recipeFullInclude,
   });
+  if (!recipe) throw ApiError.notFound('Recipe');
 
   const formatted = formatRecipeFull(recipe);
   void updateIndexedRecipe(toSearchDocument(formatted));

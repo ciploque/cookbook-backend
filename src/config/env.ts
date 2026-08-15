@@ -1,9 +1,14 @@
 import { z } from 'zod';
+import { assertProductionOrigins } from './envGuards';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(3000),
   API_BASE_PATH: z.string().default('/api'),
+  // Number of trusted reverse-proxy hops for `app.set('trust proxy')`. Must match the real
+  // deployment topology so rate limiting keys off the true client IP and not a spoofable
+  // X-Forwarded-For. 0 = don't trust the header at all (app directly reachable).
+  TRUST_PROXY: z.coerce.number().int().min(0).default(1),
 
   DATABASE_URL: z.string().url(),
 
@@ -35,6 +40,12 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+const originsError = assertProductionOrigins(env.NODE_ENV, env.ALLOWED_ORIGINS);
+if (originsError) {
+  console.error(originsError);
+  process.exit(1);
+}
 
 export const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map((s) => s.trim());
 

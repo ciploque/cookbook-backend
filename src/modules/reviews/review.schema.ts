@@ -1,11 +1,13 @@
 import { z } from 'zod';
-import { trustedImageUrlSchema } from '../../utils/imageUrl';
 
 export const createReviewSchema = z.object({
   recipeId: z.string().uuid(),
   rating: z.number().int().min(1).max(5),
   content: z.string().max(2000).optional(),
-  imageUrls: z.array(trustedImageUrlSchema).max(10).optional().default([]),
+});
+
+export const removeReviewImagesSchema = z.object({
+  paths: z.array(z.string().min(1)).min(1).max(10),
 });
 
 // Not cumulative — one value at a time. `rating:N` filters to a single rating;
@@ -29,6 +31,7 @@ export const reviewQuerySchema = z.object({
 });
 
 export type CreateReviewInput = z.infer<typeof createReviewSchema>;
+export type RemoveReviewImagesInput = z.infer<typeof removeReviewImagesSchema>;
 export type ReviewQuery = z.infer<typeof reviewQuerySchema>;
 export type ReviewFilter = ReviewQuery['filter'];
 export type ReviewOrder = ReviewQuery['order'];

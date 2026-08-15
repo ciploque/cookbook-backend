@@ -18,7 +18,7 @@ import { asyncHandler } from './utils/asyncHandler';
 
 export function createApp(): express.Application {
   const app = express();
-  app.set('trust proxy', 1); // trust the first proxy hop (nginx / Cloudflare / ELB) so req.ip is the real client IP
+  app.set('trust proxy', env.TRUST_PROXY); // trusted proxy hops (env-driven) so req.ip is the real client IP, not a spoofable X-Forwarded-For
 
   app.use(helmet());
   const corsOptions: cors.CorsOptions = {
