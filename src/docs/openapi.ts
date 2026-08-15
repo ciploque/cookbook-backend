@@ -22,6 +22,12 @@ import {
   removeRecipesSchema,
   collectionQuerySchema,
 } from '../modules/collections/collection.schema';
+import {
+  createRecipeReportSchema,
+  reportQuerySchema,
+  reportStatusValues,
+  reportTargetTypeValues,
+} from '../modules/reports/report.schema';
 
 const registry = new OpenAPIRegistry();
 
@@ -235,6 +241,33 @@ const PatchCollectionBody = registry.register('PatchCollectionBody', patchCollec
 const AddRecipesBody = registry.register('AddRecipesBody', addRecipesSchema);
 const RemoveRecipesBody = registry.register('RemoveRecipesBody', removeRecipesSchema);
 
+const ReportSchema = registry.register(
+  'Report',
+  z.object({
+    id: z.string().uuid(),
+    targetType: z.enum(reportTargetTypeValues),
+    topic: z.string(),
+    message: z.string().nullable(),
+    status: z.enum(reportStatusValues),
+    // Populated when targetType is "recipe"; null for other target types.
+    recipe: z
+      .object({
+        id: z.string().uuid(),
+        slug: z.string(),
+        title: z.string(),
+        coverImageUrl: z.string().nullable(),
+      })
+      .nullable(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
+
+const CreateRecipeReportBody = registry.register(
+  'CreateRecipeReportBody',
+  createRecipeReportSchema,
+);
+
 // ── Security scheme ───────────────────────────────────────────────────────────
 
 registry.registerComponent('securitySchemes', 'bearerAuth', {
@@ -379,6 +412,10 @@ registry.registerPath({
       description: 'User not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -457,6 +494,10 @@ registry.registerPath({
     },
     404: {
       description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },
@@ -590,6 +631,10 @@ registry.registerPath({
       description: 'Recipe not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -672,6 +717,10 @@ registry.registerPath({
     },
     404: {
       description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },
@@ -792,6 +841,10 @@ registry.registerPath({
         },
       },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -874,6 +927,10 @@ registry.registerPath({
     },
     404: {
       description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },
@@ -1030,6 +1087,10 @@ registry.registerPath({
       description: 'User not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -1086,6 +1147,10 @@ registry.registerPath({
     },
     404: {
       description: 'Collection not found or private',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },
@@ -1219,6 +1284,10 @@ registry.registerPath({
       description: 'Collection not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -1328,6 +1397,10 @@ registry.registerPath({
       description: 'Already following',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
   },
 });
 
@@ -1347,6 +1420,91 @@ registry.registerPath({
     },
     401: {
       description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/recipes/{recipeId}/reports',
+  tags: ['Reports'],
+  summary: 'Report a recipe',
+  description:
+    'Flags a recipe for moderation. One report per user per recipe; reporting your own recipe is not allowed.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ recipeId: z.string().uuid() }),
+    body: { content: { 'application/json': { schema: CreateRecipeReportBody } } },
+  },
+  responses: {
+    201: {
+      description: 'Report created',
+      content: {
+        'application/json': { schema: z.object({ success: z.literal(true), data: ReportSchema }) },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    403: {
+      description: 'Cannot report your own recipe',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Recipe or user not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'Already reported this recipe',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Validation error',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/reports/me',
+  tags: ['Reports'],
+  summary: "List the authenticated user's own reports",
+  security: [{ bearerAuth: [] }],
+  request: {
+    query: reportQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Paginated list of reports filed by the authenticated user',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            data: z.array(ReportSchema),
+            meta: PaginationMetaSchema,
+          }),
+        },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid query params',
       content: { 'application/json': { schema: ErrorSchema } },
     },
   },

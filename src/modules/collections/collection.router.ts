@@ -19,20 +19,31 @@ import {
 import { getOwnerId } from './collection.service';
 import {
   addRecipesSchema,
+  collectionParamsSchema,
   collectionQuerySchema,
   createCollectionSchema,
   patchCollectionSchema,
   removeRecipesSchema,
   updateCollectionSchema,
+  userCollectionsParamsSchema,
 } from './collection.schema';
 
 const router = Router();
 
 const ownerGuard = authorize((req) => getOwnerId(req.params.collectionId as string));
 
+// Runs before ownerGuard — the guard hits Prisma, and a malformed uuid there raises
+// P2023 (a 500) instead of a clean 422. See collection.schema.ts.
+const validateCollectionId = validate(collectionParamsSchema, 'params');
+
 // Public — optionalAuthenticate populates req.user (if a valid session is present) so the
 // owner can see their own private collection; it never rejects an unauthenticated request.
-router.get('/:collectionId', optionalAuthenticate, asyncHandler(getCollectionById));
+router.get(
+  '/:collectionId',
+  validateCollectionId,
+  optionalAuthenticate,
+  asyncHandler(getCollectionById),
+);
 
 // Metadata CRUD
 router.post(
@@ -44,6 +55,7 @@ router.post(
 router.put(
   '/:collectionId',
   authenticate,
+  validateCollectionId,
   asyncHandler(ownerGuard),
   validate(updateCollectionSchema, 'body'),
   asyncHandler(updateCollection),
@@ -51,6 +63,7 @@ router.put(
 router.patch(
   '/:collectionId',
   authenticate,
+  validateCollectionId,
   asyncHandler(ownerGuard),
   validate(patchCollectionSchema, 'body'),
   asyncHandler(patchCollection),
@@ -58,6 +71,7 @@ router.patch(
 router.delete(
   '/:collectionId',
   authenticate,
+  validateCollectionId,
   asyncHandler(ownerGuard),
   asyncHandler(deleteCollection),
 );
@@ -66,6 +80,7 @@ router.delete(
 router.post(
   '/:collectionId/recipes',
   authenticate,
+  validateCollectionId,
   asyncHandler(ownerGuard),
   validate(addRecipesSchema, 'body'),
   asyncHandler(addRecipesToCollection),
@@ -73,14 +88,25 @@ router.post(
 router.delete(
   '/:collectionId/recipes',
   authenticate,
+  validateCollectionId,
   asyncHandler(ownerGuard),
   validate(removeRecipesSchema, 'body'),
   asyncHandler(removeRecipesFromCollection),
 );
 
 // Follow / unfollow
-router.post('/:collectionId/follow', authenticate, asyncHandler(followCollection));
-router.delete('/:collectionId/follow', authenticate, asyncHandler(unfollowCollection));
+router.post(
+  '/:collectionId/follow',
+  authenticate,
+  validateCollectionId,
+  asyncHandler(followCollection),
+);
+router.delete(
+  '/:collectionId/follow',
+  authenticate,
+  validateCollectionId,
+  asyncHandler(unfollowCollection),
+);
 
 // Lives under the /users prefix but owned by the collections module.
 // Mounted in app.ts at `${base}/v1/users`.
@@ -97,6 +123,7 @@ userCollectionsRouter.get(
 );
 userCollectionsRouter.get(
   '/:userId/collections',
+  validate(userCollectionsParamsSchema, 'params'),
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listPublicCollectionsByUser),
 );

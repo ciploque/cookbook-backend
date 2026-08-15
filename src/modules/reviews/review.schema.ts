@@ -30,6 +30,16 @@ export const reviewQuerySchema = z.object({
   order: z.enum(reviewOrderValues).default('newest'),
 });
 
+// See the note on recipeParamsSchema in recipe.schema.ts — uuid params are validated
+// before they reach Prisma, and each schema declares every param on its route.
+export const reviewParamsSchema = z.object({
+  reviewId: z.string().uuid(),
+});
+
+export const recipeReviewsParamsSchema = z.object({
+  recipeId: z.string().uuid(),
+});
+
 export type CreateReviewInput = z.infer<typeof createReviewSchema>;
 export type RemoveReviewImagesInput = z.infer<typeof removeReviewImagesSchema>;
 export type ReviewQuery = z.infer<typeof reviewQuerySchema>;

@@ -13,11 +13,22 @@ import {
   removeReviewImages,
 } from './review.controller';
 import { getReviewAuthorId } from './review.service';
-import { createReviewSchema, removeReviewImagesSchema, reviewQuerySchema } from './review.schema';
+import {
+  createReviewSchema,
+  recipeReviewsParamsSchema,
+  removeReviewImagesSchema,
+  reviewParamsSchema,
+  reviewQuerySchema,
+} from './review.schema';
 
 const router = Router();
 
 const ownerGuard = authorize((req) => getReviewAuthorId(req.params.reviewId as string));
+
+// Runs before ownerGuard — the guard hits Prisma, and a malformed uuid there raises
+// P2023 (a 500) instead of a clean 422. See review.schema.ts.
+const validateReviewId = validate(reviewParamsSchema, 'params');
+const validateRecipeId = validate(recipeReviewsParamsSchema, 'params');
 
 // Image uploads are heavier than typical JSON writes — a stricter limit than the
 // default writeLimiter this router is otherwise mounted under (see app.ts).
@@ -33,6 +44,7 @@ router.post(
   '/:reviewId/images',
   authenticate,
   uploadLimiter,
+  validateReviewId,
   asyncHandler(ownerGuard),
   uploadImagesArray('images', 10),
   asyncHandler(addReviewImages),
@@ -41,6 +53,7 @@ router.delete(
   '/:reviewId/images',
   authenticate,
   uploadLimiter,
+  validateReviewId,
   asyncHandler(ownerGuard),
   validate(removeReviewImagesSchema, 'body'),
   asyncHandler(removeReviewImages),
@@ -51,9 +64,14 @@ router.delete(
 export const recipeReviewsRouter = Router();
 recipeReviewsRouter.get(
   '/:recipeId/reviews',
+  validateRecipeId,
   validate(reviewQuerySchema, 'query'),
   asyncHandler(listReviewsByRecipe),
 );
-recipeReviewsRouter.get('/:recipeId/reviews/summary', asyncHandler(getRecipeReviewStats));
+recipeReviewsRouter.get(
+  '/:recipeId/reviews/summary',
+  validateRecipeId,
+  asyncHandler(getRecipeReviewStats),
+);
 
 export default router;

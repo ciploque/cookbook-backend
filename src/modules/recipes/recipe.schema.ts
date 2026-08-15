@@ -58,6 +58,18 @@ export const recipeQuerySchema = z.object({
   order: z.enum(['asc', 'desc']).default('desc'),
 });
 
+// Route params carrying a uuid must be validated before they reach Prisma — a malformed
+// value against a `@db.Uuid` column raises P2023, which would surface as a 500 instead of
+// a 422. Each schema must declare *every* param on its route: `validate` replaces
+// req.params with the parsed object, and Zod strips keys the schema doesn't mention.
+export const recipeParamsSchema = z.object({
+  recipeId: z.string().uuid(),
+});
+
+export const userRecipesParamsSchema = z.object({
+  userId: z.string().uuid(),
+});
+
 export type CreateRecipeInput = z.infer<typeof createRecipeSchema>;
 export type UpdateRecipeInput = z.infer<typeof updateRecipeSchema>;
 export type PatchRecipeInput = z.infer<typeof patchRecipeSchema>;

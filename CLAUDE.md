@@ -79,6 +79,11 @@ cookbook-backend/
 │   │   │   ├── collection.controller.ts
 │   │   │   ├── collection.service.ts
 │   │   │   └── collection.schema.ts   # metadata schemas (no recipes); addRecipesSchema; removeRecipesSchema
+│   │   ├── reports/
+│   │   │   ├── report.router.ts       # GET /reports/me + the cross-prefix recipeReportsRouter (POST /recipes/:recipeId/reports)
+│   │   │   ├── report.controller.ts
+│   │   │   ├── report.service.ts
+│   │   │   └── report.schema.ts       # Zod schemas; topic enums are per target type (recipeReportTopicValues)
 │   │   ├── ingredients/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
 │   │   ├── tags/
@@ -120,8 +125,13 @@ cookbook-backend/
 │   │   │   └── review.schema.test.ts
 │   │   ├── collections/
 │   │   │   └── collection.service.test.ts
+│   │   ├── reports/
+│   │   │   ├── report.service.test.ts
+│   │   │   └── report.schema.test.ts
 │   │   ├── webhooks/
 │   │   │   └── clerk.webhook.controller.test.ts
+│   │   ├── routers/
+│   │   │   └── paramsValidation.test.ts  # mounts the real routers; asserts 422 on every uuid param route
 │   │   └── middlewares/
 │   │       ├── authenticate.test.ts
 │   │       └── verifyClerkWebhook.test.ts
@@ -277,8 +287,8 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 
 | Limiter | Max | Applied to |
 |---|---|---|
-| `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike) |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter), plus the cross-module GET routes: `recipeReviewsRouter`, `userRecipesRouter`, `userCollectionsRouter` |
+| `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), plus the cross-module GET routes: `recipeReviewsRouter`, `userRecipesRouter`, `userCollectionsRouter` |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -618,6 +628,81 @@ Both require `authenticate` + an owner guard (`req.user.sub` must match the revi
 
 ---
 
+### Reports
+
+Content moderation. All reports — for recipes, reviews and users — live in a single
+`reports` table; only the **recipe** path is implemented (see
+[Schema decisions](#database-schema) for why one table with typed FK columns rather
+than a table per reportable entity).
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/recipes/:recipeId/reports` | Required | Report a recipe (one per user per recipe) |
+| GET | `/reports/me` | Required | Paginated list of reports filed by the authenticated user |
+
+#### POST /recipes/:recipeId/reports — Request Body
+
+```json
+{
+  "topic": "string (required — one of the recipe topics below)",
+  "message": "string (optional, max 2000)"
+}
+```
+
+**Recipe report topics** (`recipeReportTopicValues` in `report.schema.ts`):
+`spam` · `inappropriate_content` · `copyright` · `dangerous_instructions` ·
+`misleading_recipe` · `other`
+
+Topic lists are **per target type** — a recipe report and a review report describe
+different problems, so each reportable entity gets its own `*TopicValues` list and
+its own create schema rather than one flattened union. `targetType` is server-set
+(`"recipe"` on this route), never client-supplied.
+
+**Errors:** `404 RECIPE_NOT_FOUND` if the recipe doesn't exist · `404 USER_NOT_FOUND`
+if the reporter has no provisioned row · `403 FORBIDDEN` when reporting your own
+recipe (same convention as "authors cannot follow their own collections") ·
+`409 CONFLICT` if you've already reported this recipe · `422 VALIDATION_ERROR` on an
+unknown topic or a non-UUID `recipeId`.
+
+> Like every other UUID route param in the API, `recipeId` is validated before it reaches
+> Prisma — see [Route Param Validation](#route-param-validation).
+
+#### GET /reports/me — Query Parameters
+
+| Param | Type | Description |
+|---|---|---|
+| `page` | number | Default `1` |
+| `limit` | number | Default `20`, max `50` |
+
+Ordered `createdAt` descending. **Errors:** `404 USER_NOT_FOUND`.
+
+#### Report Object Shape
+
+```json
+{
+  "id": "uuid",
+  "targetType": "recipe",
+  "topic": "spam",
+  "message": "string | null",
+  "status": "pending",
+  "recipe": { "id": "uuid", "slug": "string", "title": "string", "coverImageUrl": "string | null" },
+  "createdAt": "ISO8601",
+  "updatedAt": "ISO8601"
+}
+```
+
+`recipe` is populated when `targetType` is `"recipe"` and `null` otherwise. The
+reporter is deliberately omitted — it's always the authenticated caller on both
+routes. `status` (`pending` | `reviewed` | `dismissed`) is present but **no endpoint
+writes it yet**; it exists so a future moderation queue needs no migration.
+
+**Not implemented:** any moderation/admin endpoint (list all reports, change
+`status`), report withdrawal (`DELETE /reports/:reportId`), and review/user reports.
+Note the consequence of no withdrawal route: the unique constraint means a user who
+reports a recipe can never report it again.
+
+---
+
 ### Collections
 
 | Method | Path | Auth | Description |
@@ -700,7 +785,7 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
 | `RECIPE_NOT_FOUND` | 404 | Recipe record not found |
 | `REVIEW_NOT_FOUND` | 404 | Review record not found |
 | `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
-| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation (also raised for a NUL byte (`0x00`) in any validated string — rejected centrally in `validate.ts` since PostgreSQL `text` can't store it) |
+| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation — including a malformed UUID in any route param (see [Route Param Validation](#route-param-validation)), and a NUL byte (`0x00`) in any validated string (rejected centrally in `validate.ts` since PostgreSQL `text` can't store it) |
 | `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
 | `PAYLOAD_TOO_LARGE` | 413 | Request body exceeds the `express.json` size limit (body-parser `entity.too.large`, mapped in `errorHandler.ts`) |
 | `INVALID_JSON` | 400 | Malformed JSON in the request body (body-parser `entity.parse.failed`) |
@@ -734,6 +819,7 @@ model User {
   updatedAt   DateTime @updatedAt
 
   recipes Recipe[]
+  reports Report[] @relation("ReportReporter")
 
   @@map("users")
 }
@@ -763,6 +849,7 @@ model Recipe {
   steps       RecipeStep[]
   recipeTags  RecipeTag[]
   reviews     Review[]
+  reports     Report[]
 
   @@unique([authorId, slug])            // slug is unique per author, not globally
   @@index([authorId])
@@ -887,6 +974,27 @@ model CollectionFollower {
   @@index([userId])                     // reverse lookup ("collections user X follows")
   @@map("collection_followers")
 }
+
+// One table for every kind of report, with a real typed FK per reportable entity
+// rather than an untyped targetId — see Schema decisions.
+model Report {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  targetType String                       // "recipe" | "review" | "user" — Zod-validated, server-set
+  topic      String                       // per-target-type Zod enum, see report.schema.ts
+  message    String?
+  status     String   @default("pending") // pending | reviewed | dismissed — no endpoint writes this yet
+  reporterId String   @db.Uuid
+  recipeId   String?  @db.Uuid            // set when targetType = "recipe"
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  reporter User    @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  recipe   Recipe? @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, reporterId])      // one report per user per recipe; see Schema decisions re: NULLs
+  @@index([reporterId])                 // GET /reports/me
+  @@map("reports")
+}
 ```
 
 **Schema decisions:**
@@ -906,6 +1014,15 @@ model CollectionFollower {
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
 - `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. `POST /reviews` is currently the only write path for reviews (no update/delete route exists), so the stat update in `review.service.ts#createReview` is a simple atomic increment-and-recompute (single `UPDATE ... RETURNING`) inside the same transaction as the review insert, with no decrement/recompute-on-delete case to handle yet. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document. If a delete/update review endpoint is added later, its handler must recompute (not just decrement) `averageRating`/`ratingSum`/`reviewCount` from the `Review` table for that recipe.
 - `Review.imageUrls` is populated only via `POST`/`DELETE /reviews/:reviewId/images` (Cloudflare R2) — not accepted in the `POST /reviews` body — same pattern as `Recipe.coverImageUrl`/`imageUrls`. See [Review Images (Cloudflare R2)](#review-images-cloudflare-r2).
+- `Report` is **one table for every reportable entity**, not a table per entity. Moderation is inherently cross-entity ("show me the open queue"); three parallel tables would mean three services, three paginators, three OpenAPI blocks, and a manual merge/sort for any admin view. What it deliberately avoids is the usual polymorphic shortcut — a `targetType` plus an untyped `targetId String` — which has no foreign key at all: deleting a recipe would silently orphan its reports, and a typo'd UUID would insert happily. Instead `targetType` records intent for reading, and each reportable entity gets its own **nullable, real FK column** (`recipeId` today; `reviewId`/`reportedUserId` are additive later), each with `onDelete: Cascade`. No join table and no write-time transaction.
+- `Report`'s one-report-per-user rule is `@@unique([recipeId, reporterId])`. PostgreSQL treats NULLs as distinct in a unique index, so rows for other target types (`recipeId = NULL`) never collide with each other — the constraint is naturally scoped per target type, and each new FK column brings its own `@@unique([<fk>, reporterId])`. The `P2002` is caught in `report.service.ts#createRecipeReport` and rethrown as `ApiError.conflict(...)`, same as `createReview`/`followCollection`.
+- **Not yet enforced at the DB level:** "exactly one target FK is non-null, and it matches `targetType`". Prisma can't express a CHECK constraint, so it needs hand-written SQL. With a single target type the service is the only writer and always sets `recipeId`, so the constraint has near-zero value today — add it in the same migration that introduces the second target type:
+  ```sql
+  ALTER TABLE reports ADD CONSTRAINT reports_exactly_one_target CHECK (
+    num_nonnulls(recipe_id, review_id, reported_user_id) = 1
+  );
+  ```
+- `Report.topic` and `Report.status` are plain `String` (not Prisma enums), consistent with `Recipe.category`/`Review.rating` — the schema has no enums anywhere. Allowed values live in `report.schema.ts` as `as const` arrays feeding `z.enum(...)`, so adding a topic is a code change with no migration; the trade-off is that the DB accepts anything written outside the API. Topic lists are **per target type** (`recipeReportTopicValues`), since the valid complaints about a recipe differ from those about a review or a user.
 
 ---
 
@@ -961,9 +1078,45 @@ The `validate` middleware factory (`src/middlewares/validate.ts`) accepts a Zod 
 ```typescript
 validate(createRecipeSchema, 'body')
 validate(recipeQuerySchema, 'query')
+validate(recipeParamsSchema, 'params')
 ```
 
 Validation failures produce a `422 VALIDATION_ERROR` response with `details` containing Zod's flattened field errors.
+
+### Route Param Validation
+
+**Every route param holding a UUID is validated.** PostgreSQL `uuid` columns reject a
+malformed value, and Prisma raises `P2023` — which the error handler can only map to a
+`500 INTERNAL_ERROR`. Validating at the router turns that into a clean `422` instead:
+
+```typescript
+const validateRecipeId = validate(recipeParamsSchema, 'params');
+```
+
+Two rules when adding a parameterized route:
+
+1. **Params validation runs before the ownership guard.** `authorize()` resolves the
+   owner through Prisma, so an unvalidated UUID would hit the database inside the guard
+   and 500 there — before the controller is ever reached. Order:
+   `authenticate` → (rate limiter) → `validate(…, 'params')` → `asyncHandler(ownerGuard)`
+   → `validate(…, 'body')` → `asyncHandler(controller)`.
+2. **A params schema must declare *every* param on its route.** `validate` replaces
+   `req.params` with the parsed object, and Zod strips keys the schema doesn't mention —
+   a partial schema silently drops the others. This is why
+   `GET /users/:username/recipes/:recipename` has no params schema at all rather than one
+   covering only `username`.
+
+Params that aren't UUIDs (`:username`, `:recipename`) are deliberately **not** validated:
+they're plain strings, so they can't raise `P2023`, and an unknown value is already a
+clean `404` from the service. Adding a format check there would convert legitimate 404s
+into 422s for no safety benefit.
+
+Each module declares its own params schemas next to its body/query schemas
+(`recipeParamsSchema`, `reviewParamsSchema`, `collectionParamsSchema`, `userParamsSchema`,
+plus the cross-prefix `userRecipesParamsSchema` / `userCollectionsParamsSchema` /
+`recipeReviewsParamsSchema` / `recipeReportParamsSchema`). `tests/unit/routers/paramsValidation.test.ts`
+mounts the real routers and asserts a `422` on every UUID route, that the owner guard is
+never reached, and that the `me` / `username` routes still resolve.
 
 ---
 
@@ -1073,7 +1226,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (271 passing)
+### Unit Tests (323 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1093,6 +1246,9 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/reviews/review.service.test.ts` | 25 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
 | `tests/unit/reviews/review.schema.test.ts` | 10 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
 | `tests/unit/collections/collection.service.test.ts` | 28 | listPublicCollectionsByUser (always public-filtered, user not found), listMyCollections (all public+private for the authenticated owner, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/routers/paramsValidation.test.ts` | 31 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
+| `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
+| `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
 | `tests/unit/middlewares/validate.test.ts` | 5 | Valid input passes + unknown keys stripped; schema failure → 422; NUL byte (`0x00`) rejected → 422 at top level, nested in arrays/objects, and in query params |
@@ -1211,6 +1367,7 @@ Both run via `docker/docker-compose.yml`.
 - [x] Uncaught exceptions and unhandled rejections are logged and trigger graceful shutdown
 - [x] `GET /health` probes DB with `prisma.$queryRaw\`SELECT 1\``
 - [x] 75 unit tests passing across 7 test files
+- [x] Every UUID route param validated at the router — malformed ids return `422` instead of a Prisma `P2023` → `500` (see [Route Param Validation](#route-param-validation))
 - [ ] Integration tests written (≥70% service coverage target)
 - [ ] `.env.example` comments reviewed and complete
 
@@ -1247,3 +1404,15 @@ Both run via `docker/docker-compose.yml`.
 - [x] Documented in OpenAPI spec (`src/docs/openapi.ts`)
 - [x] Unit tests: storage service, image signature detection, recipe service upload/delete/cap-enforcement paths
 - [x] `POST`/`DELETE /reviews/:reviewId/images` — the "reviews" case of the storage service's planned reusability realized; `imageUrls` removed from `POST /reviews` body, capped at 10 images total, owner-only, rate-limited
+
+### Milestone 10 — Reports (recipe reports) ✅
+- [x] `Report` model — one table for all reportable entities, `targetType` + typed nullable FK per entity (`recipeId` today), `onDelete: Cascade`, `status` column reserved for future moderation
+- [x] `@@unique([recipeId, reporterId])` enforces one report per user per recipe; `P2002` → `409 CONFLICT`
+- [x] `src/modules/reports/` — router / controller / service / schema, with per-target-type topic lists
+- [x] `POST /recipes/:recipeId/reports` — authenticated, `writeLimiter`, validates params + body, blocks self-reports with `403 FORBIDDEN`
+- [x] `GET /reports/me` — authenticated, paginated, scoped to the caller's own reports
+- [x] Documented in OpenAPI spec (`src/docs/openapi.ts`) under the `Reports` tag
+- [x] Unit tests: service paths + schema validation (21 new tests)
+- [ ] Moderation/admin endpoints (list all reports, set `status`) — not started
+- [ ] Review and user reports — schema absorbs them without restructuring; no columns, topics or routes yet
+- [ ] `DELETE /reports/:reportId` (withdraw) — not implemented; without it the unique constraint permanently blocks a re-report

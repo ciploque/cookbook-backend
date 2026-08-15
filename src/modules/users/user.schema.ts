@@ -23,5 +23,13 @@ export const updateUserSchema = z.object({
   avatarUrl: trustedImageUrlSchema.optional(),
 });
 
+// See the note on recipeParamsSchema in recipe.schema.ts — uuid params are validated
+// before they reach Prisma. `GET /users/username/:username` is deliberately not
+// validated: a username is a plain string, so it can't raise P2023 — an unknown one
+// is a clean 404 from the service.
+export const userParamsSchema = z.object({
+  userId: z.string().uuid(),
+});
+
 export type ProvisionUserInput = z.infer<typeof provisionUserSchema>;
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;

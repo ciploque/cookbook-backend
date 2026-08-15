@@ -31,6 +31,16 @@ export const collectionQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+// See the note on recipeParamsSchema in recipe.schema.ts — uuid params are validated
+// before they reach Prisma, and each schema declares every param on its route.
+export const collectionParamsSchema = z.object({
+  collectionId: z.string().uuid(),
+});
+
+export const userCollectionsParamsSchema = z.object({
+  userId: z.string().uuid(),
+});
+
 export type CreateCollectionInput = z.infer<typeof createCollectionSchema>;
 export type UpdateCollectionInput = z.infer<typeof updateCollectionSchema>;
 export type PatchCollectionInput = z.infer<typeof patchCollectionSchema>;

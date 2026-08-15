@@ -21,6 +21,7 @@ model User {
   reviews             Review[]
   collections         Collection[]
   followedCollections CollectionFollower[]
+  reports             Report[]             @relation("ReportReporter")
 
   @@map("users")
 }
@@ -51,6 +52,7 @@ model Recipe {
   recipeTags  RecipeTag[]
   reviews     Review[]
   collections CollectionRecipe[]
+  reports     Report[]
 
   @@unique([authorId, slug])
   @@index([authorId])
@@ -171,4 +173,25 @@ model CollectionFollower {
   @@id([collectionId, userId])
   @@index([userId])
   @@map("collection_followers")
+}
+
+// One table for every kind of report, with a real typed FK per reportable entity
+// rather than an untyped targetId — see "Schema decisions" in CLAUDE.md.
+model Report {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  targetType String
+  topic      String
+  message    String?
+  status     String   @default("pending")
+  reporterId String   @db.Uuid
+  recipeId   String?  @db.Uuid
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  reporter User    @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  recipe   Recipe? @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, reporterId])
+  @@index([reporterId])
+  @@map("reports")
 }

@@ -13,6 +13,7 @@ import userRouter from './modules/users/user.router';
 import recipeRouter, { userRecipesRouter } from './modules/recipes/recipe.router';
 import reviewRouter, { recipeReviewsRouter } from './modules/reviews/review.router';
 import collectionRouter, { userCollectionsRouter } from './modules/collections/collection.router';
+import reportRouter, { recipeReportsRouter } from './modules/reports/report.router';
 import webhookRouter from './modules/webhooks/clerk.webhook.router';
 import { asyncHandler } from './utils/asyncHandler';
 
@@ -85,6 +86,10 @@ export function createApp(): express.Application {
   app.use(`${base}/v1/recipes`, readLimiter, recipeReviewsRouter);
   app.use(`${base}/v1/reviews`, writeLimiter, reviewRouter);
   app.use(`${base}/v1/collections`, writeLimiter, collectionRouter);
+  // Reports: the POST is a write, so it gets writeLimiter rather than inheriting the
+  // /recipes mount's readLimiter. GET /reports/me is a plain read.
+  app.use(`${base}/v1/recipes`, writeLimiter, recipeReportsRouter);
+  app.use(`${base}/v1/reports`, readLimiter, reportRouter);
 
   if (env.NODE_ENV !== 'production') {
     const removeCSP = (
