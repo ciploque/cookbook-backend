@@ -9,11 +9,18 @@ import {
   UpdateCollectionInput,
 } from './collection.schema';
 
-export async function listCollectionsByUser(req: Request, res: Response): Promise<void> {
-  const result = await collectionService.listCollectionsByUser(
+export async function listPublicCollectionsByUser(req: Request, res: Response): Promise<void> {
+  const result = await collectionService.listPublicCollectionsByUser(
     req.params.userId as string,
     req.query as unknown as CollectionQuery,
-    req.user?.sub,
+  );
+  res.json({ success: true, ...result });
+}
+
+export async function listMyCollections(req: Request, res: Response): Promise<void> {
+  const result = await collectionService.listMyCollections(
+    req.user!.sub,
+    req.query as unknown as CollectionQuery,
   );
   res.json({ success: true, ...result });
 }

@@ -26,7 +26,8 @@ vi.mock('../../../src/config/database', () => ({
 
 import { prisma } from '../../../src/config/database';
 import {
-  listCollectionsByUser,
+  listPublicCollectionsByUser,
+  listMyCollections,
   getCollectionById,
   createCollection,
   updateCollection,
@@ -80,39 +81,56 @@ const mockTargetUser = { id: 'owner-uuid', authProviderId: 'user_owner' };
 
 beforeEach(() => vi.clearAllMocks());
 
-// ─── listCollectionsByUser ────────────────────────────────────────────────────
+// ─── listPublicCollectionsByUser ──────────────────────────────────────────────
 
-describe('listCollectionsByUser()', () => {
-  it('returns public collections for a non-owner', async () => {
+describe('listPublicCollectionsByUser()', () => {
+  it('always filters to public collections, regardless of caller', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockTargetUser as never);
     vi.mocked(prisma.collection.count).mockResolvedValue(1);
     vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull] as never);
 
-    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_other');
+    const result = await listPublicCollectionsByUser('owner-uuid', { page: 1, limit: 20 });
 
     const whereArg = vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
-    expect(whereArg).toMatchObject({ isPublic: true });
+    expect(whereArg).toMatchObject({ ownerId: 'owner-uuid', isPublic: true });
     expect(result.data).toHaveLength(1);
     expect(result.data[0]).toHaveProperty('followerCount', 3);
     expect(result.data[0].owner).not.toHaveProperty('authProviderId');
   });
 
-  it('includes private collections when requester is the owner', async () => {
+  it('throws USER_NOT_FOUND when user does not exist', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
+
+    await expect(listPublicCollectionsByUser('missing-id', { page: 1, limit: 20 })).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'USER_NOT_FOUND',
+    });
+  });
+});
+
+// ─── listMyCollections ─────────────────────────────────────────────────────────
+
+describe('listMyCollections()', () => {
+  it('returns all (public + private) collections for the authenticated owner', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockTargetUser as never);
     vi.mocked(prisma.collection.count).mockResolvedValue(2);
     vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull, mockPrivateCollection] as never);
 
-    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
+    const result = await listMyCollections('user_owner', { page: 1, limit: 20 });
 
+    expect(prisma.user.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { authProviderId: 'user_owner' } }),
+    );
     const whereArg = vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
+    expect(whereArg).toMatchObject({ ownerId: 'owner-uuid' });
     expect(whereArg).not.toHaveProperty('isPublic');
     expect(result.data).toHaveLength(2);
   });
 
-  it('throws USER_NOT_FOUND when user does not exist', async () => {
+  it('throws USER_NOT_FOUND when the authenticated user has no provisioned User row', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(listCollectionsByUser('missing-id', { page: 1, limit: 20 })).rejects.toMatchObject({
+    await expect(listMyCollections('user_unprovisioned', { page: 1, limit: 20 })).rejects.toMatchObject({
       statusCode: 404,
       code: 'USER_NOT_FOUND',
     });

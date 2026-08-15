@@ -207,7 +207,7 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 
 ### Optional Auth (`optionalAuthenticate`)
 
-Some routes are readable by anyone but need to know *who's asking* to shape the response — e.g. `GET /collections/:collectionId` and `GET /users/:userId/collections` show private collections to their owner but 404/filter them for everyone else. Neither of these routes runs `authenticate` (that would incorrectly reject anonymous requests to what's a public-by-default endpoint). Instead they run `optionalAuthenticate`, which resolves `getAuth(req)` the same way `authenticate` does but **never rejects**: it sets `req.user` when a valid session (or dev-bypass header) is present, and just calls `next()` unauthenticated otherwise — including when `getAuth` throws on a malformed token. Downstream service code reads `req.user?.sub` and treats `undefined` as "anonymous."
+Some routes are readable by anyone but need to know *who's asking* to shape the response — e.g. `GET /collections/:collectionId` shows a private collection to its owner but 404s it for everyone else. This route doesn't run `authenticate` (that would incorrectly reject anonymous requests to what's a public-by-default endpoint). Instead it runs `optionalAuthenticate`, which resolves `getAuth(req)` the same way `authenticate` does but **never rejects**: it sets `req.user` when a valid session (or dev-bypass header) is present, and just calls `next()` unauthenticated otherwise — including when `getAuth` throws on a malformed token. Downstream service code reads `req.user?.sub` and treats `undefined` as "anonymous."
 
 Do not reach for `req.user?.sub` on a route that hasn't run either `authenticate` or `optionalAuthenticate` — `req.user` is never populated by `clerkMiddleware()` alone, only by one of these two.
 
@@ -604,7 +604,8 @@ no new index needed.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/users/:userId/collections` | Public* | List user's collections (private filtered unless owner) |
+| GET | `/users/:userId/collections` | Public | List a user's public collections |
+| GET | `/users/me/collections` | Required | List all (public + private) collections owned by the authenticated user |
 | GET | `/collections/:collectionId` | Public* | Get single collection with ordered recipes (first 50 only — see note below) |
 | POST | `/collections` | Required | Create collection (metadata only) |
 | PUT | `/collections/:collectionId` | Required + Owner | Full metadata update |
@@ -615,9 +616,11 @@ no new index needed.
 | POST | `/collections/:collectionId/follow` | Required, not owner | Follow public collection |
 | DELETE | `/collections/:collectionId/follow` | Required | Unfollow |
 
-*Private collections: 404 for single, filtered out for list, when accessed by non-owner. Both of these `Public*` routes run `optionalAuthenticate` (not `authenticate`) so an owner's own valid session is recognized without rejecting anonymous requests — see [Optional Auth](#optional-auth-optionalauthenticate).
+*Private collections: 404 when a non-owner accesses `GET /collections/:collectionId` directly. That route runs `optionalAuthenticate` (not `authenticate`) so an owner's own valid session is recognized without rejecting anonymous requests — see [Optional Auth](#optional-auth-optionalauthenticate). `GET /users/:userId/collections` and `GET /users/me/collections` are deliberately separate endpoints instead of one auth-dependent route: the former is unconditionally public-only (no auth involved at all), the latter requires a valid session and always returns the full set for that session's own user — see the note on `userCollectionsRouter` route registration order below.
 
-**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them.
+**Route registration order:** `GET /users/me/collections` is registered **before** `GET /users/:userId/collections` in `userCollectionsRouter` (`collection.router.ts`) so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`.
+
+**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them.
 
 #### POST /collections — Request Body
 
@@ -1066,7 +1069,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
 | `tests/unit/reviews/review.service.test.ts` | 18 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count) |
 | `tests/unit/reviews/review.schema.test.ts` | 8 | `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
-| `tests/unit/collections/collection.service.test.ts` | 27 | listCollectionsByUser (public filter, owner all, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/collections/collection.service.test.ts` | 28 | listPublicCollectionsByUser (always public-filtered, user not found), listMyCollections (all public+private for the authenticated owner, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
 | `tests/unit/middlewares/verifyClerkWebhook.test.ts` | 2 | Attaches verified event to `req.clerkEvent` on success; 400 `INVALID_WEBHOOK_SIGNATURE` on verification failure |

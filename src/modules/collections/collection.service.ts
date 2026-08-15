@@ -38,26 +38,12 @@ function formatCollection(
   return { ...rest, owner: ownerPublic, followerCount: _count.followers };
 }
 
-export async function listCollectionsByUser(
-  userId: string,
-  query: CollectionQuery,
-  requestingAuthProviderId?: string,
+async function paginateCollections(
+  where: Prisma.CollectionWhereInput,
+  page: number,
+  limit: number,
 ) {
-  const targetUser = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, authProviderId: true },
-  });
-  if (!targetUser) throw ApiError.notFound('User');
-
-  const isOwner =
-    !!requestingAuthProviderId && requestingAuthProviderId === targetUser.authProviderId;
-  const { page, limit } = query;
   const skip = toSkip(page, limit);
-
-  const where: Prisma.CollectionWhereInput = {
-    ownerId: userId,
-    ...(!isOwner && { isPublic: true }),
-  };
 
   const [total, collections] = await Promise.all([
     prisma.collection.count({ where }),
@@ -74,6 +60,26 @@ export async function listCollectionsByUser(
     data: collections.map(formatCollection),
     meta: buildMeta(page, limit, total),
   };
+}
+
+export async function listPublicCollectionsByUser(userId: string, query: CollectionQuery) {
+  const targetUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true },
+  });
+  if (!targetUser) throw ApiError.notFound('User');
+
+  return paginateCollections({ ownerId: userId, isPublic: true }, query.page, query.limit);
+}
+
+export async function listMyCollections(authProviderId: string, query: CollectionQuery) {
+  const owner = await prisma.user.findUnique({
+    where: { authProviderId },
+    select: { id: true },
+  });
+  if (!owner) throw ApiError.notFound('User');
+
+  return paginateCollections({ ownerId: owner.id }, query.page, query.limit);
 }
 
 export async function getCollectionById(collectionId: string, requestingAuthProviderId?: string) {

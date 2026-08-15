@@ -912,14 +912,14 @@ registry.registerPath({
   method: 'get',
   path: '/api/v1/users/{userId}/collections',
   tags: ['Collections'],
-  summary: 'List collections by user',
+  summary: "List a user's public collections",
   request: {
     params: z.object({ userId: z.string().uuid() }),
     query: collectionQuerySchema,
   },
   responses: {
     200: {
-      description: 'Paginated list of collections',
+      description: 'Paginated list of public collections',
       content: {
         'application/json': {
           schema: z.object({
@@ -929,6 +929,40 @@ registry.registerPath({
           }),
         },
       },
+    },
+    404: {
+      description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/users/me/collections',
+  tags: ['Collections'],
+  summary: "List all of the authenticated user's collections",
+  description: 'Returns both public and private collections owned by the authenticated user.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    query: collectionQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Paginated list of the authenticated user’s collections',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            data: z.array(CollectionSchema),
+            meta: PaginationMetaSchema,
+          }),
+        },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
     },
     404: {
       description: 'User not found',

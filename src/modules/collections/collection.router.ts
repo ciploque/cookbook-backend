@@ -9,7 +9,8 @@ import {
   deleteCollection,
   followCollection,
   getCollectionById,
-  listCollectionsByUser,
+  listMyCollections,
+  listPublicCollectionsByUser,
   patchCollection,
   removeRecipesFromCollection,
   unfollowCollection,
@@ -84,11 +85,20 @@ router.delete('/:collectionId/follow', authenticate, asyncHandler(unfollowCollec
 // Lives under the /users prefix but owned by the collections module.
 // Mounted in app.ts at `${base}/v1/users`.
 export const userCollectionsRouter = Router();
+
+// Registered before /:userId/collections so "me" isn't swallowed by the :userId
+// wildcard — same pattern as /users/:username/recipes/:recipename vs
+// /users/:userId/recipes in recipe.router.ts.
+userCollectionsRouter.get(
+  '/me/collections',
+  authenticate,
+  validate(collectionQuerySchema, 'query'),
+  asyncHandler(listMyCollections),
+);
 userCollectionsRouter.get(
   '/:userId/collections',
-  optionalAuthenticate,
   validate(collectionQuerySchema, 'query'),
-  asyncHandler(listCollectionsByUser),
+  asyncHandler(listPublicCollectionsByUser),
 );
 
 export default router;
