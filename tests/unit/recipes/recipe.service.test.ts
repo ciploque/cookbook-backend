@@ -14,6 +14,14 @@ vi.mock('../../../src/config/database', () => ({
     user: {
       findUnique: vi.fn(),
     },
+    // Read by resolveViewerState() on the two detail GETs — not a cross-module import,
+    // both hang off relations declared on Recipe itself.
+    review: {
+      findFirst: vi.fn(),
+    },
+    collectionRecipe: {
+      findFirst: vi.fn(),
+    },
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
   },
@@ -126,6 +134,61 @@ describe('getRecipeById()', () => {
       code: 'RECIPE_NOT_FOUND',
     });
   });
+
+  it('returns false viewer state without querying when the caller is anonymous', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+
+    const result = await getRecipeById('recipe-uuid');
+
+    expect(result).toMatchObject({ hasReviewed: false, isSavedInCollection: false });
+    expect(prisma.review.findFirst).not.toHaveBeenCalled();
+    expect(prisma.collectionRecipe.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('returns both flags true when the viewer reviewed and saved the recipe', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.review.findFirst).mockResolvedValue({ id: 'review-uuid' } as never);
+    vi.mocked(prisma.collectionRecipe.findFirst).mockResolvedValue({
+      recipeId: 'recipe-uuid',
+    } as never);
+
+    const result = await getRecipeById('recipe-uuid', 'user_viewer');
+
+    expect(result).toMatchObject({ hasReviewed: true, isSavedInCollection: true });
+  });
+
+  it('returns both flags false when the viewer has neither reviewed nor saved', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.review.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.collectionRecipe.findFirst).mockResolvedValue(null);
+
+    const result = await getRecipeById('recipe-uuid', 'user_viewer');
+
+    expect(result).toMatchObject({ hasReviewed: false, isSavedInCollection: false });
+  });
+
+  it('scopes both viewer lookups by recipe id and the caller authProviderId', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.review.findFirst).mockResolvedValue(null);
+    vi.mocked(prisma.collectionRecipe.findFirst).mockResolvedValue(null);
+
+    await getRecipeById('recipe-uuid', 'user_viewer');
+
+    expect(prisma.review.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { recipeId: 'recipe-uuid', author: { authProviderId: 'user_viewer' } },
+      }),
+    );
+    // Owned collections only — a followed collection is not "saved".
+    expect(prisma.collectionRecipe.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          recipeId: 'recipe-uuid',
+          collection: { owner: { authProviderId: 'user_viewer' } },
+        },
+      }),
+    );
+  });
 });
 
 // ─── getRecipeByUsernameAndSlug ───────────────────────────────────────────────
@@ -160,6 +223,26 @@ describe('getRecipeByUsernameAndSlug()', () => {
       statusCode: 404,
       code: 'RECIPE_NOT_FOUND',
     });
+  });
+
+  it('carries the same viewer state as getRecipeById', async () => {
+    vi.mocked(prisma.recipe.findFirst).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.review.findFirst).mockResolvedValue({ id: 'review-uuid' } as never);
+    vi.mocked(prisma.collectionRecipe.findFirst).mockResolvedValue(null);
+
+    const result = await getRecipeByUsernameAndSlug('joao', 'pasta-carbonara-abcd', 'user_viewer');
+
+    expect(result).toMatchObject({ hasReviewed: true, isSavedInCollection: false });
+  });
+
+  it('returns false viewer state for an anonymous caller', async () => {
+    vi.mocked(prisma.recipe.findFirst).mockResolvedValue(mockRecipeFull as never);
+
+    const result = await getRecipeByUsernameAndSlug('joao', 'pasta-carbonara-abcd');
+
+    expect(result).toMatchObject({ hasReviewed: false, isSavedInCollection: false });
+    expect(prisma.review.findFirst).not.toHaveBeenCalled();
+    expect(prisma.collectionRecipe.findFirst).not.toHaveBeenCalled();
   });
 });
 

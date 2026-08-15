@@ -152,10 +152,20 @@ describe('malformed uuid route params are rejected with 422', () => {
 // ─── Well-formed uuids still pass through ─────────────────────────────────────
 
 describe('well-formed uuid params still reach the handler', () => {
+  // The trailing `undefined` is the viewer sub: optionalAuthenticate runs on this route and,
+  // with no Clerk middleware mounted here, leaves req.user unset rather than rejecting.
   it('GET /recipes/:recipeId passes validation and keeps the param', async () => {
     const res = await api().get(`/recipes/${UUID}`);
     expect(res.status).toBe(200);
-    expect(recipeService.getRecipeById).toHaveBeenCalledWith(UUID);
+    expect(recipeService.getRecipeById).toHaveBeenCalledWith(UUID, undefined);
+  });
+
+  it('GET /recipes/:recipeId forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get(`/recipes/${UUID}`)
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(recipeService.getRecipeById).toHaveBeenCalledWith(UUID, 'dev-user');
   });
 
   it('DELETE /recipes/:recipeId reaches the owner guard with the param intact', async () => {
@@ -178,6 +188,7 @@ describe('non-uuid routes are unaffected', () => {
     expect(recipeService.getRecipeByUsernameAndSlug).toHaveBeenCalledWith(
       'joao',
       'pasta-carbonara',
+      undefined,
     );
   });
 

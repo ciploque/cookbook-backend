@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { authenticate } from '../../middlewares/authenticate';
+import { authenticate, optionalAuthenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { uploadImagesArray, uploadSingleImage } from '../../middlewares/upload';
@@ -35,7 +35,14 @@ const uploadLimiter = rateLimit({
 });
 
 router.get('/', validate(recipeQuerySchema, 'query'), asyncHandler(controller.listRecipes));
-router.get('/:recipeId', validateRecipeId, asyncHandler(controller.getRecipeById));
+// Public, but optionalAuthenticate resolves the caller (when there is one) so the detail
+// response can carry the viewer-scoped hasReviewed / isSavedInCollection flags.
+router.get(
+  '/:recipeId',
+  optionalAuthenticate,
+  validateRecipeId,
+  asyncHandler(controller.getRecipeById),
+);
 router.post('/', authenticate, validate(createRecipeSchema), asyncHandler(controller.createRecipe));
 router.put(
   '/:recipeId',
@@ -102,8 +109,11 @@ export const userRecipesRouter = Router();
 // More-specific (3-segment) route first, per the documented invariant.
 // :username/:recipename are plain strings (not uuids), so there is nothing to validate
 // here — an unknown pair is a clean 404 from the service, never a P2023.
+// optionalAuthenticate for the same reason as GET /recipes/:recipeId — same detail shape,
+// same viewer-scoped flags.
 userRecipesRouter.get(
   '/:username/recipes/:recipename',
+  optionalAuthenticate,
   asyncHandler(controller.getRecipeByUsernameAndSlug),
 );
 userRecipesRouter.get(

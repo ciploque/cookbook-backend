@@ -14,8 +14,10 @@ export async function listRecipes(req: Request, res: Response): Promise<void> {
   res.json({ success: true, ...result });
 }
 
+// optionalAuthenticate populates req.user only when a valid session is present — an anonymous
+// caller gets `undefined` here, which the service resolves to false/false viewer state.
 export async function getRecipeById(req: Request, res: Response): Promise<void> {
-  const recipe = await recipeService.getRecipeById(req.params.recipeId as string);
+  const recipe = await recipeService.getRecipeById(req.params.recipeId as string, req.user?.sub);
   res.json({ success: true, data: recipe });
 }
 
@@ -49,6 +51,7 @@ export async function getRecipeByUsernameAndSlug(req: Request, res: Response): P
   const recipe = await recipeService.getRecipeByUsernameAndSlug(
     req.params.username as string,
     req.params.recipename as string,
+    req.user?.sub,
   );
   res.json({ success: true, data: recipe });
 }

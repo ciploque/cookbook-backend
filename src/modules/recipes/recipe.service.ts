@@ -33,6 +33,31 @@ function formatRecipeFull(recipe: Prisma.RecipeGetPayload<{ include: typeof reci
   return { ...rest, tags: recipeTags.map((rt) => rt.tag.slug) };
 }
 
+const NO_VIEWER_STATE = { hasReviewed: false, isSavedInCollection: false };
+
+// Viewer-scoped flags for the recipe detail reads. Both lookups filter through a relation on
+// authProviderId, so the caller's User row never has to be resolved separately. Skipped
+// entirely for an anonymous caller — who has reviewed and saved nothing by definition.
+// Deliberately not folded into recipeFullInclude: a conditional include breaks the
+// RecipeGetPayload typing for every other caller, and toSearchDocument must never pick these
+// up — the Meilisearch document is shared across all viewers.
+async function resolveViewerState(recipeId: string, viewerSub?: string) {
+  if (!viewerSub) return NO_VIEWER_STATE;
+
+  const [review, saved] = await Promise.all([
+    prisma.review.findFirst({
+      where: { recipeId, author: { authProviderId: viewerSub } },
+      select: { id: true },
+    }),
+    prisma.collectionRecipe.findFirst({
+      where: { recipeId, collection: { owner: { authProviderId: viewerSub } } },
+      select: { recipeId: true },
+    }),
+  ]);
+
+  return { hasReviewed: review !== null, isSavedInCollection: saved !== null };
+}
+
 function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSearchDocument {
   return {
     id: recipe.id,
@@ -132,22 +157,26 @@ export async function listRecipes(query: RecipeQuery) {
   };
 }
 
-export async function getRecipeByUsernameAndSlug(username: string, slug: string) {
+export async function getRecipeByUsernameAndSlug(
+  username: string,
+  slug: string,
+  viewerSub?: string,
+) {
   const recipe = await prisma.recipe.findFirst({
     where: { slug, author: { username } },
     include: recipeFullInclude,
   });
   if (!recipe) throw ApiError.notFound('Recipe');
-  return formatRecipeFull(recipe);
+  return { ...formatRecipeFull(recipe), ...(await resolveViewerState(recipe.id, viewerSub)) };
 }
 
-export async function getRecipeById(id: string) {
+export async function getRecipeById(id: string, viewerSub?: string) {
   const recipe = await prisma.recipe.findUnique({
     where: { id },
     include: recipeFullInclude,
   });
   if (!recipe) throw ApiError.notFound('Recipe');
-  return formatRecipeFull(recipe);
+  return { ...formatRecipeFull(recipe), ...(await resolveViewerState(recipe.id, viewerSub)) };
 }
 
 export async function getRecipeAuthorId(recipeId: string): Promise<string | null> {

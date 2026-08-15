@@ -110,6 +110,16 @@ const RecipeDetailSchema = registry.register(
   }),
 );
 
+// The two single-recipe GETs only. RecipeDetail itself stays viewer-agnostic — it's shared by
+// POST/PUT/PATCH and the four image routes, whose responses carry no viewer state.
+const RecipeDetailWithViewerStateSchema = registry.register(
+  'RecipeDetailWithViewerState',
+  RecipeDetailSchema.extend({
+    hasReviewed: z.boolean(),
+    isSavedInCollection: z.boolean(),
+  }),
+);
+
 const RecipeListItemSchema = registry.register(
   'RecipeListItem',
   z.object({
@@ -482,15 +492,18 @@ registry.registerPath({
   path: '/api/v1/recipes/{recipeId}',
   tags: ['Recipes'],
   summary: 'Get recipe by ID',
+  description:
+    'Public. A bearer token is optional: when present, `hasReviewed` and `isSavedInCollection` ' +
+    'describe the authenticated caller. Both are `false` for an anonymous request.',
   request: {
     params: z.object({ recipeId: z.string().uuid() }),
   },
   responses: {
     200: {
-      description: 'Full recipe detail',
+      description: 'Full recipe detail, including viewer-scoped state',
       content: {
         'application/json': {
-          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+          schema: z.object({ success: z.literal(true), data: RecipeDetailWithViewerStateSchema }),
         },
       },
     },
@@ -855,16 +868,19 @@ registry.registerPath({
   path: '/api/v1/users/{username}/recipes/{recipename}',
   tags: ['Recipes'],
   summary: 'Get recipe by author username + slug',
-  description: 'Human-friendly URL. Slug uniqueness is scoped per user.',
+  description:
+    'Human-friendly URL. Slug uniqueness is scoped per user. Public, but a bearer token is ' +
+    'optional: when present, `hasReviewed` and `isSavedInCollection` describe the ' +
+    'authenticated caller. Both are `false` for an anonymous request.',
   request: {
     params: z.object({ username: z.string(), recipename: z.string() }),
   },
   responses: {
     200: {
-      description: 'Full recipe detail',
+      description: 'Full recipe detail, including viewer-scoped state',
       content: {
         'application/json': {
-          schema: z.object({ success: z.literal(true), data: RecipeDetailSchema }),
+          schema: z.object({ success: z.literal(true), data: RecipeDetailWithViewerStateSchema }),
         },
       },
     },
