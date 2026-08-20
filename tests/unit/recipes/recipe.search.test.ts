@@ -1,18 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSearch, mockUpdateDocuments, mockIndex } = vi.hoisted(() => {
-  const mockSearch = vi.fn();
-  const mockUpdateDocuments = vi.fn().mockResolvedValue(undefined);
-  const mockIndex = vi.fn(() => ({ search: mockSearch, updateDocuments: mockUpdateDocuments }));
-  return { mockSearch, mockUpdateDocuments, mockIndex };
-});
+const { mockSearch, mockUpdateDocuments, mockAddDocuments, mockDeleteDocument, mockIndex } =
+  vi.hoisted(() => {
+    const mockSearch = vi.fn();
+    const mockUpdateDocuments = vi.fn().mockResolvedValue(undefined);
+    const mockAddDocuments = vi.fn().mockResolvedValue(undefined);
+    const mockDeleteDocument = vi.fn().mockResolvedValue(undefined);
+    const mockIndex = vi.fn(() => ({
+      search: mockSearch,
+      updateDocuments: mockUpdateDocuments,
+      addDocuments: mockAddDocuments,
+      deleteDocument: mockDeleteDocument,
+    }));
+    return { mockSearch, mockUpdateDocuments, mockAddDocuments, mockDeleteDocument, mockIndex };
+  });
 
 vi.mock('../../../src/config/meilisearch', () => ({
   meiliClient: { index: mockIndex },
   RECIPES_INDEX: 'recipes',
 }));
 
-import { searchRecipesViaMeili, updateIndexedRecipeRating } from '../../../src/modules/recipes/recipe.search';
+import {
+  deleteIndexedRecipe,
+  indexRecipe,
+  searchRecipesViaMeili,
+  updateIndexedRecipe,
+  updateIndexedRecipeRating,
+} from '../../../src/modules/recipes/recipe.search';
 
 const baseHit = {
   id: 'r1',
@@ -33,6 +47,70 @@ const baseHit = {
 };
 
 beforeEach(() => vi.clearAllMocks());
+
+// ─── Index sync (fire-and-forget) ─────────────────────────────────────────────
+
+describe('index sync functions', () => {
+  it('indexRecipe adds the document to the recipes index', () => {
+    indexRecipe(baseHit as never);
+
+    expect(mockIndex).toHaveBeenCalledWith('recipes');
+    expect(mockAddDocuments).toHaveBeenCalledWith([baseHit]);
+  });
+
+  it('updateIndexedRecipe replaces the document in the recipes index', () => {
+    updateIndexedRecipe(baseHit as never);
+
+    expect(mockIndex).toHaveBeenCalledWith('recipes');
+    expect(mockUpdateDocuments).toHaveBeenCalledWith([baseHit]);
+  });
+
+  it('deleteIndexedRecipe removes the document by id', () => {
+    deleteIndexedRecipe('r1');
+
+    expect(mockIndex).toHaveBeenCalledWith('recipes');
+    expect(mockDeleteDocument).toHaveBeenCalledWith('r1');
+  });
+});
+
+// Postgres is the source of truth: a Meilisearch outage must degrade search results, never
+// fail the write that triggered the sync. Each of these would otherwise surface as an
+// unhandled rejection and take the process down via the server's rejection handler.
+describe('index sync failures are swallowed, not propagated', () => {
+  const failures: [string, () => void, () => { mockRejectedValue: unknown }][] = [
+    ['indexRecipe', () => indexRecipe(baseHit as never), () => mockAddDocuments as never],
+    [
+      'updateIndexedRecipe',
+      () => updateIndexedRecipe(baseHit as never),
+      () => mockUpdateDocuments as never,
+    ],
+    [
+      'updateIndexedRecipeRating',
+      () => updateIndexedRecipeRating('r1', 4.5, 3),
+      () => mockUpdateDocuments as never,
+    ],
+    ['deleteIndexedRecipe', () => deleteIndexedRecipe('r1'), () => mockDeleteDocument as never],
+  ];
+
+  for (const [name, call, target] of failures) {
+    it(`${name} logs and resolves when Meilisearch rejects`, async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.mocked(target() as never as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('meili down'),
+      );
+
+      expect(() => call()).not.toThrow();
+      // Let the rejected promise settle — an unhandled rejection here would fail the run.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining(name),
+        expect.any(Error),
+      );
+      consoleError.mockRestore();
+    });
+  }
+});
 
 // ─── searchRecipesViaMeili — pagination ───────────────────────────────────────
 

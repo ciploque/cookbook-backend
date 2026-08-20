@@ -67,8 +67,10 @@ import {
   createRecipe,
   deleteRecipe,
   listRecipes,
+  listRecipesByUser,
   patchRecipe,
   removeGalleryImages,
+  updateRecipe,
   uploadCoverImage,
 } from '../../../src/modules/recipes/recipe.service';
 
@@ -420,6 +422,136 @@ describe('deleteRecipe()', () => {
   });
 });
 
+// ─── updateRecipe ─────────────────────────────────────────────────────────────
+
+// PUT is a full replace: children are wiped and recreated inside one transaction. These
+// mocks expose the individual tx delegates so the replace can be asserted step by step.
+function mockUpdateTransaction() {
+  const ingredientDeleteMany = vi.fn();
+  const stepDeleteMany = vi.fn();
+  const tagDeleteMany = vi.fn();
+  const update = vi.fn().mockResolvedValue(mockRecipeFull);
+
+  vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+    fn({
+      recipeIngredient: { deleteMany: ingredientDeleteMany },
+      recipeStep: { deleteMany: stepDeleteMany },
+      recipeTag: { deleteMany: tagDeleteMany },
+      recipe: { update },
+    } as never),
+  );
+
+  return { ingredientDeleteMany, stepDeleteMany, tagDeleteMany, update };
+}
+
+const updateInput = {
+  title: 'Updated Carbonara',
+  tags: ['italian'],
+  ingredients: [{ name: 'Guanciale' }, { name: 'Pecorino' }],
+  steps: [{ order: 1, instruction: 'Render the guanciale' }],
+};
+
+describe('updateRecipe()', () => {
+  it('wipes ingredients, steps and tags before recreating them, all in one transaction', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([{ id: 'tag-1', name: 'italian', slug: 'italian' }]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', updateInput);
+
+    // A PUT that only appended would leave the previous ingredients/steps/tags behind.
+    expect(tx.ingredientDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(tx.stepDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(tx.tagDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('recreates ingredients with order re-assigned from array position', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', updateInput);
+
+    expect(tx.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'recipe-uuid' },
+        data: expect.objectContaining({
+          ingredients: {
+            create: [
+              { name: 'Guanciale', order: 0 },
+              { name: 'Pecorino', order: 1 },
+            ],
+          },
+        }),
+      }),
+    );
+  });
+
+  it('links the upserted tag rows rather than the raw tag strings', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([
+      { id: 'tag-1', name: 'italian', slug: 'italian' },
+      { id: 'tag-2', name: 'pasta', slug: 'pasta' },
+    ]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', { ...updateInput, tags: ['italian', 'pasta'] });
+
+    expect(upsertTags).toHaveBeenCalledWith(['italian', 'pasta']);
+    expect(tx.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          recipeTags: { create: [{ tagId: 'tag-1' }, { tagId: 'tag-2' }] },
+        }),
+      }),
+    );
+  });
+
+  it('never writes slug — it is immutable even when the title changes', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', updateInput);
+
+    expect(tx.update.mock.calls[0][0].data).not.toHaveProperty('slug');
+  });
+
+  it('does not let a PUT body overwrite the server-managed image fields', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', {
+      ...updateInput,
+      coverImageUrl: '/attacker/controlled.jpg',
+      imageUrls: ['/attacker/controlled.jpg'],
+    } as never);
+
+    const data = tx.update.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty('coverImageUrl');
+    expect(data).not.toHaveProperty('imageUrls');
+  });
+
+  it('syncs the replaced recipe to Meilisearch with its flattened tags', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([{ id: 'tag-1', name: 'italian', slug: 'italian' }]);
+    mockUpdateTransaction();
+
+    const result = await updateRecipe('recipe-uuid', updateInput);
+
+    expect(updateIndexedRecipe).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'recipe-uuid', tags: ['italian'] }),
+    );
+    expect(result.tags).toEqual(['italian']);
+    expect(result).not.toHaveProperty('recipeTags');
+  });
+
+  it('does not touch the search index when the transaction fails', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(prisma.$transaction).mockRejectedValue(new Error('deadlock'));
+
+    await expect(updateRecipe('recipe-uuid', updateInput)).rejects.toThrow('deadlock');
+
+    expect(updateIndexedRecipe).not.toHaveBeenCalled();
+  });
+});
+
 // ─── patchRecipe ──────────────────────────────────────────────────────────────
 
 describe('patchRecipe()', () => {
@@ -526,6 +658,48 @@ describe('patchRecipe()', () => {
     const updateData = updateMock.mock.calls[0][0].data;
     expect(updateData).not.toHaveProperty('authorNote');
   });
+
+  // The difference between PATCH and PUT lives entirely in these three guards: a section the
+  // body omits must survive untouched, so its deleteMany must not run.
+  it('only wipes the child rows the body actually replaces', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const tx = mockUpdateTransaction();
+
+    await patchRecipe('recipe-uuid', { ingredients: [{ name: 'Guanciale' }] });
+
+    expect(tx.ingredientDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(tx.stepDeleteMany).not.toHaveBeenCalled();
+    expect(tx.tagDeleteMany).not.toHaveBeenCalled();
+    expect(upsertTags).not.toHaveBeenCalled();
+  });
+
+  it('leaves every child section alone when the body is metadata only', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const tx = mockUpdateTransaction();
+
+    await patchRecipe('recipe-uuid', { title: 'Updated Title' });
+
+    expect(tx.ingredientDeleteMany).not.toHaveBeenCalled();
+    expect(tx.stepDeleteMany).not.toHaveBeenCalled();
+    expect(tx.tagDeleteMany).not.toHaveBeenCalled();
+    const data = tx.update.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty('ingredients');
+    expect(data).not.toHaveProperty('steps');
+    expect(data).not.toHaveProperty('recipeTags');
+  });
+
+  // `tags: []` is a real instruction ("remove all tags"), not an absent field — the
+  // `!== undefined` check is what keeps those two apart.
+  it('clears all tags when the body passes an empty tags array', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    const tx = mockUpdateTransaction();
+
+    await patchRecipe('recipe-uuid', { tags: [] });
+
+    expect(tx.tagDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(tx.update.mock.calls[0][0].data.recipeTags).toEqual({ create: [] });
+  });
 });
 
 // ─── listRecipes ──────────────────────────────────────────────────────────────
@@ -620,6 +794,51 @@ describe('listRecipes()', () => {
 
     expect(searchRecipesViaMeili).toHaveBeenCalledWith(query);
     expect(prisma.recipe.count).not.toHaveBeenCalled();
+  });
+});
+
+// ─── listRecipesByUser ────────────────────────────────────────────────────────
+
+describe('listRecipesByUser()', () => {
+  it('scopes the listing to the user in the path', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    await listRecipesByUser('author-uuid', {
+      page: 1, limit: 20, sortBy: 'createdAt', order: 'desc',
+    });
+
+    const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
+    expect(whereArg).toMatchObject({ authorId: 'author-uuid' });
+  });
+
+  // The path segment is the authority here — a query string can't redirect the listing
+  // at someone else's recipes.
+  it('overrides an authorId supplied in the query string', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    await listRecipesByUser('author-uuid', {
+      page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', authorId: 'someone-else-uuid',
+    });
+
+    const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
+    expect(whereArg).toMatchObject({ authorId: 'author-uuid' });
+  });
+
+  it('keeps the other filters and routes to Meilisearch when q is present', async () => {
+    vi.mocked(searchRecipesViaMeili).mockResolvedValue({
+      data: [],
+      meta: { page: 1, limit: 20, total: 0, totalPages: 0, hasNextPage: false, hasPrevPage: false },
+    });
+
+    await listRecipesByUser('author-uuid', {
+      q: 'carbonara', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', category: 'pasta',
+    });
+
+    expect(searchRecipesViaMeili).toHaveBeenCalledWith(
+      expect.objectContaining({ q: 'carbonara', category: 'pasta', authorId: 'author-uuid' }),
+    );
   });
 });
 
@@ -774,6 +993,42 @@ describe('addGalleryImages()', () => {
 
     // Orphan cleanup: the just-stored object is deleted from R2.
     expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/b.jpg');
+  });
+
+  it('deletes every stored object when a multi-file upload loses the race', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
+      ...mockRecipeFull,
+      imageUrls: [],
+    } as never);
+    vi.mocked(storeImage)
+      .mockResolvedValueOnce('/recipes/recipe-uuid/gallery/b.jpg')
+      .mockResolvedValueOnce('/recipes/recipe-uuid/gallery/c.jpg');
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(0 as never);
+
+    await expect(
+      addGalleryImages('recipe-uuid', [Buffer.from('x'), Buffer.from('y')]),
+    ).rejects.toMatchObject({ statusCode: 422 });
+
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/b.jpg');
+    expect(deleteImage).toHaveBeenCalledWith('/recipes/recipe-uuid/gallery/c.jpg');
+    expect(deleteImage).toHaveBeenCalledTimes(2);
+  });
+
+  // The append succeeded, so the objects are legitimately referenced — the recipe only
+  // disappears here if it was deleted mid-request, and that must surface as a 404, not a crash.
+  it('throws RECIPE_NOT_FOUND when the recipe vanishes before the post-append re-fetch', async () => {
+    vi.mocked(prisma.recipe.findUnique)
+      .mockResolvedValueOnce({ ...mockRecipeFull, imageUrls: [] } as never)
+      .mockResolvedValueOnce(null);
+    vi.mocked(storeImage).mockResolvedValue('/recipes/recipe-uuid/gallery/b.jpg');
+    vi.mocked(prisma.$executeRaw).mockResolvedValue(1 as never);
+
+    await expect(addGalleryImages('recipe-uuid', [Buffer.from('x')])).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'RECIPE_NOT_FOUND',
+    });
+
+    expect(updateIndexedRecipe).not.toHaveBeenCalled();
   });
 });
 
