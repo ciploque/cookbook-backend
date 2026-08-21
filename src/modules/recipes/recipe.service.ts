@@ -84,7 +84,9 @@ function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSe
   };
 }
 
-const recipeListSelect = {
+// Exported as this module's public list-item contract: the shelves module renders the same
+// abbreviated recipe shape, and duplicating the select/mapper there would let the two drift.
+export const recipeListSelect = {
   id: true,
   slug: true,
   title: true,
@@ -103,7 +105,7 @@ const recipeListSelect = {
   recipeTags: { include: { tag: true } },
 } satisfies Prisma.RecipeSelect;
 
-function formatRecipeListItem(
+export function formatRecipeListItem(
   recipe: Prisma.RecipeGetPayload<{ select: typeof recipeListSelect }>,
 ) {
   const { recipeTags, description, ...rest } = recipe;

@@ -14,6 +14,7 @@ import recipeRouter, { userRecipesRouter } from './modules/recipes/recipe.router
 import reviewRouter, { recipeReviewsRouter } from './modules/reviews/review.router';
 import collectionRouter, { userCollectionsRouter } from './modules/collections/collection.router';
 import reportRouter, { recipeReportsRouter } from './modules/reports/report.router';
+import shelfRouter from './modules/shelves/shelf.router';
 import webhookRouter from './modules/webhooks/clerk.webhook.router';
 import { asyncHandler } from './utils/asyncHandler';
 
@@ -90,6 +91,9 @@ export function createApp(): express.Application {
   // /recipes mount's readLimiter. GET /reports/me is a plain read.
   app.use(`${base}/v1/recipes`, writeLimiter, recipeReportsRouter);
   app.use(`${base}/v1/reports`, readLimiter, reportRouter);
+  // Landing-page shelves: public reads served from a precomputed snapshot. Authoring is the
+  // checked-in registry + `npm run shelves:sync`, so this router has no write routes.
+  app.use(`${base}/v1/shelves`, readLimiter, shelfRouter);
 
   if (env.NODE_ENV !== 'production') {
     const removeCSP = (

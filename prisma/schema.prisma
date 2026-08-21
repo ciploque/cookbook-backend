@@ -53,6 +53,7 @@ model Recipe {
   reviews     Review[]
   collections CollectionRecipe[]
   reports     Report[]
+  shelfItems  ShelfItem[]
 
   @@unique([authorId, slug])
   @@index([authorId])
@@ -194,4 +195,45 @@ model Report {
   @@unique([recipeId, reporterId])
   @@index([reporterId])
   @@map("reports")
+}
+
+// A themed row on the landing page ("Top Drinks", "Recently Added", a seasonal row…).
+// `source` names a resolver in src/modules/shelves/resolvers, `criteria` is that resolver's
+// own Zod-validated payload — so a new kind of theme is a new resolver, not a migration.
+// Contents are a precomputed snapshot in ShelfItem, rewritten by `npm run shelves:refresh`.
+model Shelf {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  slug        String    @unique
+  title       String
+  subtitle    String?
+  source      String // resolver name: "query" | "manual" | "trending"
+  criteria    Json // resolver-specific, validated per source at sync time
+  maxItems    Int       @default(20)
+  position    Int       @default(0)
+  isActive    Boolean   @default(true)
+  startsAt    DateTime? // publish window — seasonal rows self-activate and retire
+  endsAt      DateTime?
+  refreshedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  items ShelfItem[]
+
+  @@index([isActive, position])
+  @@map("shelves")
+}
+
+// The resolved snapshot of a shelf. Cascades on recipe delete, so a removed recipe drops
+// out of every shelf with no cleanup job.
+model ShelfItem {
+  shelfId  String @db.Uuid
+  recipeId String @db.Uuid
+  order    Int
+
+  shelf  Shelf  @relation(fields: [shelfId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@id([shelfId, recipeId])
+  @@index([shelfId, order])
+  @@map("shelf_items")
 }

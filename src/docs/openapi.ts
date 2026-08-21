@@ -23,6 +23,7 @@ import {
   removeRecipesSchema,
   collectionQuerySchema,
 } from '../modules/collections/collection.schema';
+import { shelfQuerySchema, shelfSourceValues } from '../modules/shelves/shelf.schema';
 import {
   createRecipeReportSchema,
   reportQuerySchema,
@@ -1622,6 +1623,93 @@ registry.registerPath({
     },
     404: {
       description: 'User not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid query params',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+// ── Shelves ───────────────────────────────────────────────────────────────────
+
+const ShelfMetaSchema = registry.register(
+  'Shelf',
+  z.object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    title: z.string(),
+    subtitle: z.string().nullable(),
+    // Names the resolver that produced the contents — see src/modules/shelves/resolvers/.
+    source: z.enum(shelfSourceValues),
+    position: z.number().int(),
+    // null until the shelf has been refreshed at least once.
+    refreshedAt: z.string().datetime().nullable(),
+  }),
+);
+
+const ShelfWithItemsSchema = registry.register(
+  'ShelfWithItems',
+  ShelfMetaSchema.extend({
+    items: z.array(RecipeListItemSchema),
+  }),
+);
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/shelves',
+  tags: ['Shelves'],
+  summary: 'List the landing-page shelves',
+  description:
+    'Every active shelf whose publish window contains the current time, ordered by position, each with its ' +
+    'recipes in shelf order. Contents are a precomputed snapshot rewritten by `npm run shelves:refresh`, so ' +
+    'this costs the same regardless of how expensive a shelf\'s criteria are. Shelves that currently resolve ' +
+    'to zero recipes are omitted, so the response never contains an empty row. Not paginated — the number of ' +
+    'shelves is small and editorially controlled.',
+  responses: {
+    200: {
+      description: 'Active shelves with their recipes',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            data: z.array(ShelfWithItemsSchema),
+          }),
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/shelves/{slug}',
+  tags: ['Shelves'],
+  summary: 'Get one shelf with paginated recipes',
+  description:
+    'The "see all" view behind a landing-page row. Returns 404 for an unknown slug, and also for a shelf that ' +
+    'is inactive or outside its publish window — an expired seasonal row is not browsable by direct link.',
+  request: {
+    params: z.object({ slug: z.string() }),
+    query: shelfQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Shelf metadata plus a page of its recipes',
+      content: {
+        'application/json': {
+          schema: z.object({
+            success: z.literal(true),
+            shelf: ShelfMetaSchema,
+            data: z.array(RecipeListItemSchema),
+            meta: PaginationMetaSchema,
+          }),
+        },
+      },
+    },
+    404: {
+      description: 'Shelf not found, inactive, or outside its publish window',
       content: { 'application/json': { schema: ErrorSchema } },
     },
     422: {

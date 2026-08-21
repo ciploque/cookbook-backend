@@ -19,6 +19,8 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "meili:reindex": "tsx prisma/reindexMeilisearch.ts",
+    "shelves:sync": "tsx prisma/syncShelves.ts",
+    "shelves:refresh": "tsx prisma/refreshShelves.ts",
     "clerk:token": "tsx scripts/clerkToken.ts",
     "dev:tunnel": "bash scripts/dev-tunnel.sh",
     "dev:tunnel:build": "bash scripts/dev-tunnel.sh --build"

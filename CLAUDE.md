@@ -84,6 +84,18 @@ cookbook-backend/
 │   │   │   ├── report.controller.ts
 │   │   │   ├── report.service.ts
 │   │   │   └── report.schema.ts       # Zod schemas; topic enums are per target type (recipeReportTopicValues)
+│   │   ├── shelves/
+│   │   │   ├── shelf.router.ts        # GET /shelves + GET /shelves/:slug — public reads only
+│   │   │   ├── shelf.controller.ts
+│   │   │   ├── shelf.service.ts       # serving (snapshot reads) + refresh/sync (write paths, CLI-driven)
+│   │   │   ├── shelf.schema.ts        # per-source criteria schemas + shelfDefinitionSchema (config validation)
+│   │   │   ├── shelves.config.ts      # THE REGISTRY — checked-in themed-row definitions, source of truth
+│   │   │   └── resolvers/             # the mechanism: one module per criteria kind
+│   │   │       ├── types.ts           # ShelfResolver<C> interface — the extension point
+│   │   │       ├── index.ts           # registry + getResolver/parseCriteria/resolveShelfItems
+│   │   │       ├── query.resolver.ts    # delegates to recipe.service#listRecipes (incl. Meilisearch)
+│   │   │       ├── manual.resolver.ts   # hand-pinned ordered recipe ids
+│   │   │       └── trending.resolver.ts # review counts in a time window
 │   │   ├── ingredients/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
 │   │   ├── tags/
@@ -109,7 +121,9 @@ cookbook-backend/
 ├── prisma/
 │   ├── schema.prisma
 │   ├── migrations/
-│   └── reindexMeilisearch.ts  # One-shot bulk reindex script: reads all recipes from DB, pushes to Meili
+│   ├── reindexMeilisearch.ts  # One-shot bulk reindex script: reads all recipes from DB, pushes to Meili
+│   ├── syncShelves.ts         # Applies shelves.config.ts to the DB, then refreshes contents
+│   └── refreshShelves.ts      # Re-resolves shelf criteria into shelf_items (all shelves, or one by slug)
 ├── tests/
 │   ├── unit/
 │   │   ├── utils/
@@ -128,6 +142,10 @@ cookbook-backend/
 │   │   ├── reports/
 │   │   │   ├── report.service.test.ts
 │   │   │   └── report.schema.test.ts
+│   │   ├── shelves/
+│   │   │   ├── shelf.service.test.ts
+│   │   │   ├── shelf.schema.test.ts
+│   │   │   └── resolvers.test.ts
 │   │   ├── webhooks/
 │   │   │   └── clerk.webhook.controller.test.ts
 │   │   ├── routers/
@@ -296,7 +314,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 | Limiter | Max | Applied to |
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -869,6 +887,105 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
 
 ---
 
+### Shelves
+
+Themed recipe rows for the landing page ("Recently Added", "Top Drinks", a seasonal
+Halloween row). The point of the module is **not** any particular row — it's a mechanism
+for defining new ones without writing new code.
+
+Three ideas carry it:
+
+1. **A shelf is a saved query.** `Shelf.criteria` is a JSONB blob interpreted by the
+   resolver named in `Shelf.source`. The `query` resolver simply calls
+   `recipeService.listRecipes`, so a shelf inherits every filter `GET /recipes` supports —
+   tag AND-ing, category equality, `minRating`, sorting, and Meilisearch free-text — and
+   can never drift from it.
+2. **Contents are a precomputed snapshot.** A refresh job resolves criteria and writes the
+   ordered recipe ids into `shelf_items`. Serving the landing page is then one indexed
+   query no matter how many shelves exist or how expensive their criteria are.
+3. **Authoring is a checked-in file, not an API.** `src/modules/shelves/shelves.config.ts`
+   is the source of truth, applied by `npm run shelves:sync`. There are deliberately **no
+   write endpoints** — the codebase has no admin/role concept, and a config file gives
+   code review and git history for free.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/shelves` | Public | All live shelves with their recipes — the landing page |
+| GET | `/shelves/:slug` | Public | One shelf, paginated recipes ("see all") |
+
+#### The resolver registry — how to add a new kind of row
+
+Each `source` is a module in `src/modules/shelves/resolvers/` implementing `ShelfResolver<C>`:
+a Zod schema for its own criteria, plus `resolve(criteria, maxItems) → ordered recipe ids`.
+
+| Source | Criteria | Behavior |
+|---|---|---|
+| `query` | subset of `recipeQuerySchema` (`q`, `tags`, `category`, `authorId`, `minRating`, `sortBy`, `order`) | Delegates to `listRecipes`. Covers most rows. |
+| `manual` | `{ recipeIds: string[] }` | Hand-pinned, order preserved exactly. The editorial escape hatch for a row no query can express. Ids whose recipe no longer exists are dropped rather than failing the refresh. |
+| `trending` | `{ windowDays, tags?, category? }` | Ranks by review count inside the window (`Review.createdAt` + the existing `@@index([recipeId])`). Time-windowed popularity is the one thing all-time `averageRating` cannot express. Built on existing data — no view counter, no rollup table, no migration. |
+
+**To add a new theme kind:** write `resolvers/<name>.resolver.ts`, register it in
+`resolvers/index.ts`, add its name to `shelfSourceValues`. No migration (criteria is JSON),
+no change to the refresh job, the serving path, or the API contract.
+
+**`maxItems` is capped at 50** because the `query` resolver runs through
+`recipeQuerySchema`, whose `limit` maxes at 50. Fine for a carousel; `GET /shelves/:slug`
+pages beyond it.
+
+#### Publish windows
+
+`startsAt`/`endsAt` are optional. A shelf outside its window is invisible to **both**
+endpoints — a seasonal row activates and retires on its own, and an expired one 404s on
+direct link rather than being browsable. No refresh or manual toggle is involved: the
+window is evaluated per request.
+
+Shelves that currently hold zero recipes are **omitted** from `GET /shelves`, so the
+frontend never renders a headed row with nothing in it.
+
+#### Refreshing
+
+```bash
+npm run shelves:sync                  # apply config -> DB, then refresh everything
+npm run shelves:refresh               # re-resolve all shelves
+npm run shelves:refresh -- top-drinks # just one
+```
+
+`sync` validates every definition — shape *and* criteria against its declared resolver —
+**before** writing anything, so a typo can't half-apply. Shelves absent from the config are
+deleted (the file is the source of truth). Each shelf's snapshot is rewritten inside one
+transaction, so a concurrent reader never sees a half-empty row, and a single failing shelf
+doesn't abort the rest of the batch.
+
+**Freshness is a function of refresh cadence** — "Recently Added" is the most sensitive
+row. Run `shelves:refresh` from the host's cron or the platform scheduler (every 15 minutes
+is ample). There is deliberately no in-process scheduler and no new npm dependency.
+
+#### Shelf Object Shape
+
+```json
+{
+  "id": "uuid",
+  "slug": "top-drinks",
+  "title": "Top Drinks",
+  "subtitle": "string | null",
+  "source": "query",
+  "position": 0,
+  "refreshedAt": "ISO8601 | null",
+  "items": [ /* Recipe List Item shape — identical to GET /recipes */ ]
+}
+```
+
+`items` uses the exact same shape as `GET /recipes` list items, via the `recipeListSelect` /
+`formatRecipeListItem` pair exported from `recipe.service.ts` — exported precisely so the
+two can't drift. `criteria` is authoring detail and is **not** exposed by the API.
+
+`GET /shelves/:slug` returns `{ success, shelf, data, meta }` — shelf metadata alongside a
+standard paginated `data`/`meta` pair.
+
+**Errors:** `404 SHELF_NOT_FOUND` · `422 VALIDATION_ERROR` on bad pagination params.
+
+---
+
 ### Error Codes
 
 | Code | HTTP | Meaning |
@@ -879,6 +996,7 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
 | `RECIPE_NOT_FOUND` | 404 | Recipe record not found |
 | `REVIEW_NOT_FOUND` | 404 | Review record not found |
 | `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
+| `SHELF_NOT_FOUND` | 404 | Shelf not found, inactive, or outside its publish window |
 | `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation — including a malformed UUID in any route param (see [Route Param Validation](#route-param-validation)), and a NUL byte (`0x00`) in any validated string (rejected centrally in `validate.ts` since PostgreSQL `text` can't store it) |
 | `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
 | `PAYLOAD_TOO_LARGE` | 413 | Request body exceeds the `express.json` size limit (body-parser `entity.too.large`, mapped in `errorHandler.ts`) |
@@ -1089,6 +1207,44 @@ model Report {
   @@index([reporterId])                 // GET /reports/me
   @@map("reports")
 }
+
+// A themed landing-page row. `source` names a resolver; `criteria` is that resolver's own
+// Zod-validated payload — so a new kind of theme is a new resolver, not a migration.
+model Shelf {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  slug        String    @unique
+  title       String
+  subtitle    String?
+  source      String                       // "query" | "manual" | "trending" — see resolvers/
+  criteria    Json                         // resolver-specific, validated per source at sync time
+  maxItems    Int       @default(20)       // capped at 50 — see the Shelves API section
+  position    Int       @default(0)        // landing-page order
+  isActive    Boolean   @default(true)
+  startsAt    DateTime?                    // publish window — seasonal rows self-activate/retire
+  endsAt      DateTime?
+  refreshedAt DateTime?                    // null until first refresh
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  items ShelfItem[]
+
+  @@index([isActive, position])            // the landing-page read
+  @@map("shelves")
+}
+
+// The precomputed snapshot of a shelf's contents.
+model ShelfItem {
+  shelfId  String @db.Uuid
+  recipeId String @db.Uuid
+  order    Int
+
+  shelf  Shelf  @relation(fields: [shelfId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@id([shelfId, recipeId])
+  @@index([shelfId, order])
+  @@map("shelf_items")
+}
 ```
 
 **Schema decisions:**
@@ -1117,6 +1273,10 @@ model Report {
   );
   ```
 - `Report.topic` and `Report.status` are plain `String` (not Prisma enums), consistent with `Recipe.category`/`Review.rating` — the schema has no enums anywhere. Allowed values live in `report.schema.ts` as `as const` arrays feeding `z.enum(...)`, so adding a topic is a code change with no migration; the trade-off is that the DB accepts anything written outside the API. Topic lists are **per target type** (`recipeReportTopicValues`), since the valid complaints about a recipe differ from those about a review or a user.
+- `Shelf.criteria` is **JSONB in Postgres**, not a document database and not a Meilisearch index. The alternatives were considered and rejected: Meilisearch is a read index rebuilt from Postgres, so it is the wrong home for authored data that nothing else can regenerate; a document DB would add a stack component, an ops surface and a monthly bill to store a table that holds ~20 rows. JSONB gives the schema-flexibility that motivated those options (every resolver stores a different criteria shape) with zero new infrastructure, and the shape is still validated — by the resolver's own Zod schema at sync time, not by the column.
+- **Shelf contents are a denormalized snapshot** (`ShelfItem`) rather than resolved per request. The landing page is the hottest endpoint and fans out to one query *per row*; resolving live would put N queries — including expensive aggregates like `trending` — on every pageview. With a snapshot the whole page is one indexed read regardless of shelf count or criteria cost, and expensive criteria run once per refresh instead of once per viewer. The trade-off is staleness bounded by refresh cadence, which is why `shelves:refresh` is meant to run on a schedule. `refreshedAt` records when each shelf was last resolved.
+- `Shelf.source` is a plain `String` naming a resolver, and `criteria` is deliberately **not** typed per source at the DB level — the same reasoning as `Report.topic`: allowed values live in `shelfSourceValues` as an `as const` array, so adding a kind of themed row is a code change with no migration. The cost is that a hand-written SQL insert could store an unknown source; `refreshShelf` fails loudly on one (naming the known sources) rather than silently serving an empty row.
+- `ShelfItem` has no `createdAt` and no surrogate id: it is derived data, fully rewritten on every refresh, so there is nothing to track. `onDelete: Cascade` on `recipeId` means a deleted recipe drops out of every shelf immediately, with no cleanup job and no dangling id — the snapshot is allowed to shrink between refreshes but never to break.
 
 ---
 
@@ -1321,7 +1481,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (347 passing)
+### Unit Tests (488 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1344,6 +1504,9 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/routers/paramsValidation.test.ts` | 32 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; the two `optionalAuthenticate` detail GETs forward the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s); `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
 | `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
+| `tests/unit/shelves/shelf.service.test.ts` | 17 | listActiveShelves (active + publish-window predicate, position/item ordering, empty shelves omitted, `criteria` never leaked, list items formatted by the shared recipe mapper), getShelfBySlug (pagination + meta, 404 unknown slug, 404 out-of-window via the same predicate), refreshShelf (atomic delete+insert+`refreshedAt` in one `$transaction`, order follows resolver output, resolver called with source/criteria/maxItems, 404), refreshAllShelves (one failing shelf doesn't abort the batch; single-slug mode skips the findMany), syncShelvesFromConfig (created vs updated counts, deletes shelves absent from config, rejects malformed definition/bad criteria/duplicate slug **before** any write) |
+| `tests/unit/shelves/resolvers.test.ts` | 14 | Registry (every known source resolves; unknown source throws naming the known ones; criteria validated per source). `query` — delegates to `listRecipes` with `maxItems` as limit, applies recipe-query defaults, passes `q` through so the shelf routes to Meilisearch. `manual` — preserves authored order against arbitrary DB order, drops ids whose recipe no longer exists, truncates to `maxItems`. `trending` — window computed from `windowDays` (default 7), `GROUP BY recipeId` ordered by count desc, no recipe filter when none given, AND-s multiple tags + category matching `listRecipes` semantics |
+| `tests/unit/shelves/shelf.schema.test.ts` | 21 | Per-source criteria schemas (query: inherits category lowercasing, empty object valid, strips page/limit, rejects bad sort/rating; manual: uuid/min/max bounds; trending: window default and 1–90 int range). `shelfQuerySchema` defaults + bounds. `shelfDefinitionSchema` — defaults, URL-safe slug regex, title/subtitle caps, `maxItems` ≤ 50, unknown source rejected, ISO date strings coerced to `Date`, `endsAt > startsAt`, open-ended windows allowed. Plus the checked-in `shelves.config.ts` itself: every definition structurally valid, every `criteria` valid for its declared source, unique slugs and positions, no unknown sources |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
 | `tests/unit/middlewares/validate.test.ts` | 5 | Valid input passes + unknown keys stripped; schema failure → 422; NUL byte (`0x00`) rejected → 422 at top level, nested in arrays/objects, and in query params |
@@ -1358,6 +1521,8 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 - Mock `../../../src/modules/tags/tag.service` to isolate tag upsert
 - Mock `../../../src/utils/slugify` to control slug output
 - Mock `../../../src/modules/recipes/recipe.search` in recipe service tests — prevents the Meilisearch import chain from triggering `env.ts` validation
+- Shelf tests: mock `../../../src/config/env` (as `{ trustedImageDomains: [] }`) — `shelf.schema.ts` derives from `recipeQuerySchema`, whose import chain reaches `env.ts` and would `process.exit(1)`. Mock `../../../src/modules/shelves/resolvers` in the service test and `../../../src/modules/recipes/recipe.service` in the resolver test, so each layer is tested against a stub of the other
+- `vi.clearAllMocks()` resets calls but **not** implementations — a test that makes a mock throw must re-establish the default in `beforeEach`, or the throwing implementation leaks into the next test (see `shelf.service.test.ts`'s `parseCriteria` default)
 - Mock `../../../src/modules/storage/storage.service` in recipe service tests, and `../../../src/config/r2` (S3 client) + `../../../src/config/env` in storage service tests
 - Mock `../../../src/config/env` and `../../../src/config/keycloak` for middleware tests; include `MEILISEARCH_URL` and `MEILISEARCH_API_KEY` in the env mock object
 - Mock `@clerk/express/webhooks` (`verifyWebhook`) for `verifyClerkWebhook` tests, and `../../../src/modules/users/user.service` for webhook controller tests
@@ -1405,6 +1570,8 @@ Both run via `docker/docker-compose.yml`.
 | `npm run db:seed` | Seed development database |
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run meili:reindex` | Bulk-index all recipes from Postgres into Meilisearch |
+| `npm run shelves:sync` | Apply `shelves.config.ts` to the DB (validates, upserts, deletes removed rows), then refresh contents |
+| `npm run shelves:refresh [-- <slug>]` | Re-resolve shelf criteria into `shelf_items`. Run on a schedule (cron, every ~15 min) to bound staleness |
 | `npm run clerk:token -- <userId>` | Mint a real Clerk session token for local API testing (no frontend needed) |
 | `npm run dev:tunnel` | Start `postgres`+`meilisearch` (`docker compose up -d`) then an `ngrok http 3001` tunnel — pair with `npm run dev` running locally. Requires the `ngrok` CLI |
 | `npm run dev:tunnel:build` | Same, but also builds and starts the containerized `app` service (`docker compose up -d --build`) instead of running the server locally |
@@ -1511,3 +1678,17 @@ Both run via `docker/docker-compose.yml`.
 - [ ] Moderation/admin endpoints (list all reports, set `status`) — not started
 - [ ] Review and user reports — schema absorbs them without restructuring; no columns, topics or routes yet
 - [ ] `DELETE /reports/:reportId` (withdraw) — not implemented; without it the unique constraint permanently blocks a re-report
+
+### Milestone 11 — Themed Shelves (landing page rows) ✅
+- [x] `Shelf` / `ShelfItem` models — JSONB `criteria`, precomputed snapshot, `onDelete: Cascade` on both FKs, `@@index([isActive, position])`
+- [x] `src/modules/shelves/resolvers/` — `ShelfResolver<C>` interface + registry; `query` (delegates to `listRecipes`, inherits Meilisearch), `manual` (hand-pinned), `trending` (review counts in a window, no new tracking infra)
+- [x] `src/modules/shelves/shelves.config.ts` — the checked-in registry; `syncShelvesFromConfig` validates shape *and* criteria-per-resolver before any write, and deletes shelves absent from the file
+- [x] `npm run shelves:sync` / `npm run shelves:refresh [-- <slug>]` — snapshot rewritten in one transaction per shelf; a failing shelf doesn't abort the batch
+- [x] `GET /shelves` (live shelves + items, empty ones omitted) and `GET /shelves/:slug` (paginated), both public, `readLimiter`
+- [x] Publish windows (`startsAt`/`endsAt`) evaluated per request — seasonal rows activate and retire with no refresh or manual toggle
+- [x] `recipeListSelect` / `formatRecipeListItem` exported from `recipe.service.ts` so shelf items match `GET /recipes` exactly
+- [x] Documented in OpenAPI spec (`src/docs/openapi.ts`) under the `Shelves` tag
+- [x] Unit tests: service, resolvers, schema + the config file itself (52 new tests)
+- [ ] Scheduled refresh — the cron/platform-scheduler entry calling `shelves:refresh` is deployment config, not yet wired anywhere
+- [ ] Admin API for shelf CRUD — deliberately deferred; needs an admin/role concept the codebase doesn't have. The service layer is already the seam an API would sit on
+- [ ] View-based trending — `trending` ranks on review activity today; a denser signal (impressions/saves) would be a new resolver plus its own tracking infra
