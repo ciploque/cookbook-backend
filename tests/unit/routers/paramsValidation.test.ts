@@ -37,6 +37,7 @@ vi.mock('../../../src/modules/reviews/review.service', () => ({
 vi.mock('../../../src/modules/collections/collection.service', () => ({
   getOwnerId: vi.fn(async () => 'dev-user'),
   getCollectionById: vi.fn(async () => ({ id: 'ok' })),
+  getMyCollectionById: vi.fn(async () => ({ id: 'ok' })),
   listCollectionsByUser: vi.fn(async () => ({ data: [], meta: {} })),
   listMyCollections: vi.fn(async () => ({ data: [], meta: {} })),
   followCollection: vi.fn(async () => undefined),
@@ -131,6 +132,7 @@ describe('malformed uuid route params are rejected with 422', () => {
     ['delete', `/collections/${BAD}/recipes`],
     ['post', `/collections/${BAD}/follow`],
     ['delete', `/collections/${BAD}/follow`],
+    ['get', `/users/me/collections/${BAD}`],
   ];
 
   for (const [method, path] of authedRoutes) {
@@ -216,40 +218,40 @@ describe('well-formed uuid params still reach the handler', () => {
     );
   });
 
-  it('GET /users/:userId forwards undefined when no session is present', async () => {
-    const res = await api().get(`/users/${UUID}`);
-    expect(res.status).toBe(200);
-    expect(userService.getUserById).toHaveBeenCalledWith(UUID, undefined);
-  });
+  // The two public profile/collection reads run no auth middleware at all: a session must not
+  // reach the service, so it can't change the answer. Their owner-scoped counterparts are
+  // GET /users/me and GET /users/me/collections[/:collectionId].
+  it('GET /users/:userId passes only the id, with or without a session', async () => {
+    expect((await api().get(`/users/${UUID}`)).status).toBe(200);
+    expect(userService.getUserById).toHaveBeenCalledWith(UUID);
 
-  it('GET /users/:userId forwards the caller sub when a session is present', async () => {
-    const res = await api()
+    await api()
       .get(`/users/${UUID}`)
       .set(...AUTH);
-    expect(res.status).toBe(200);
-    expect(userService.getUserById).toHaveBeenCalledWith(UUID, 'dev-user');
+    expect(userService.getUserById).toHaveBeenLastCalledWith(UUID);
   });
 
-  it('GET /users/:userId/collections forwards undefined when no session is present', async () => {
-    const res = await api().get(`/users/${UUID}/collections`);
-    expect(res.status).toBe(200);
-    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
-      UUID,
-      expect.anything(),
-      undefined,
-    );
-  });
+  it('GET /users/:userId/collections passes no caller, with or without a session', async () => {
+    expect((await api().get(`/users/${UUID}/collections`)).status).toBe(200);
+    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(UUID, expect.anything());
 
-  it('GET /users/:userId/collections forwards the caller sub when a session is present', async () => {
-    const res = await api()
+    await api()
       .get(`/users/${UUID}/collections`)
       .set(...AUTH);
-    expect(res.status).toBe(200);
-    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
+    expect(collectionService.listCollectionsByUser).toHaveBeenLastCalledWith(
       UUID,
       expect.anything(),
-      'dev-user',
     );
+  });
+
+  it('GET /users/me/collections/:collectionId keeps the param and takes the sub from the session', async () => {
+    const res = await api()
+      .get(`/users/me/collections/${UUID}`)
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(collectionService.getMyCollectionById).toHaveBeenCalledWith(UUID, 'dev-user');
+    // The :userId wildcard on the sibling route must not swallow the literal "me" segment.
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
   });
 });
 
@@ -271,16 +273,8 @@ describe('non-uuid routes are unaffected', () => {
   it('GET /users/username/:username is not shadowed by the /:userId uuid guard', async () => {
     const res = await api().get('/users/username/joao');
     expect(res.status).toBe(200);
-    // optionalAuthenticate runs here too — an anonymous caller resolves rather than 401ing.
-    expect(userService.getUserByUsername).toHaveBeenCalledWith('joao', undefined);
-  });
-
-  it('GET /users/username/:username forwards the caller sub when a session is present', async () => {
-    const res = await api()
-      .get('/users/username/joao')
-      .set(...AUTH);
-    expect(res.status).toBe(200);
-    expect(userService.getUserByUsername).toHaveBeenCalledWith('joao', 'dev-user');
+    // Public: no auth middleware, so the username is all the service ever receives.
+    expect(userService.getUserByUsername).toHaveBeenCalledWith('joao');
   });
 
   it('GET /users/me/collections is not swallowed by the :userId uuid guard', async () => {

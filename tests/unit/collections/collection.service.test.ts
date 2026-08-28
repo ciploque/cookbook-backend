@@ -38,6 +38,7 @@ import {
   followCollection,
   unfollowCollection,
   getOwnerId,
+  getMyCollectionById,
 } from '../../../src/modules/collections/collection.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -110,7 +111,7 @@ describe('listCollectionsByUser()', () => {
 
   const whereArg = () => vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
 
-  it('filters to public collections for an anonymous caller', async () => {
+  it('filters to public collections', async () => {
     mockList([mockCollectionFull]);
 
     const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 });
@@ -121,32 +122,29 @@ describe('listCollectionsByUser()', () => {
     expect(result.data[0].owner).not.toHaveProperty('authProviderId');
   });
 
-  it('filters to public collections for a signed-in caller who is not the owner', async () => {
+  // The signature takes no caller. Pinned so nobody reintroduces an owner-aware branch by
+  // threading a sub through — the owner's full library is listMyCollections()'s job.
+  it('stays public-filtered even when the listed user themselves is the caller', async () => {
     mockList([mockCollectionFull]);
 
-    await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_someone_else');
+    type Query = { page: number; limit: number };
+    await (listCollectionsByUser as (id: string, q: Query, sub?: string) => Promise<unknown>)(
+      'owner-uuid',
+      { page: 1, limit: 20 },
+      'user_owner',
+    );
 
     expect(whereArg()).toMatchObject({ ownerId: 'owner-uuid', isPublic: true });
   });
 
-  it('returns private collections too when the caller is the listed user', async () => {
-    mockList([mockCollectionFull, mockPrivateCollection]);
-
-    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
-
-    expect(whereArg()).toMatchObject({ ownerId: 'owner-uuid' });
-    expect(whereArg()).not.toHaveProperty('isPublic');
-    expect(result.data).toHaveLength(2);
-  });
-
-  it('resolves ownership from the target user row, not the requested id', async () => {
+  it('looks the target user up only to 404 on an unknown id', async () => {
     mockList([mockCollectionFull]);
 
-    await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
+    await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 });
 
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: 'owner-uuid' },
-      select: { id: true, authProviderId: true },
+      select: { id: true },
     });
   });
 
@@ -313,18 +311,65 @@ describe('getCollectionById()', () => {
     expect(result.recipeCount).toBe(12);
   });
 
-  it('returns a private collection to its owner', async () => {
+  it('throws COLLECTION_NOT_FOUND for a private collection', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
 
-    const result = await getCollectionById('private-uuid', 'user_owner');
-
-    expect(result).toHaveProperty('id', 'private-uuid');
+    await expect(getCollectionById('private-uuid')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'COLLECTION_NOT_FOUND',
+    });
   });
 
-  it('throws COLLECTION_NOT_FOUND for private collection accessed by non-owner', async () => {
+  // No caller can unlock a private collection here — not even its owner, who reads it through
+  // getMyCollectionById() on an authenticated route instead.
+  it('404s a private collection even when its owner is the caller', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
 
-    await expect(getCollectionById('private-uuid', 'user_other')).rejects.toMatchObject({
+    await expect(
+      (getCollectionById as (id: string, sub?: string) => Promise<unknown>)(
+        'private-uuid',
+        'user_owner',
+      ),
+    ).rejects.toMatchObject({ statusCode: 404, code: 'COLLECTION_NOT_FOUND' });
+  });
+
+  it('throws COLLECTION_NOT_FOUND when collection does not exist', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
+
+    await expect(getCollectionById('missing-id')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'COLLECTION_NOT_FOUND',
+    });
+  });
+});
+
+// ─── getMyCollectionById ──────────────────────────────────────────────────────
+
+describe('getMyCollectionById()', () => {
+  it('returns the caller’s own private collection', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
+
+    const result = await getMyCollectionById('private-uuid', 'user_owner');
+
+    expect(result).toHaveProperty('id', 'private-uuid');
+    expect(result.owner).not.toHaveProperty('authProviderId');
+  });
+
+  it('returns the caller’s own public collection too', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+
+    const result = await getMyCollectionById('collection-uuid', 'user_owner');
+
+    expect(result).toHaveProperty('id', 'collection-uuid');
+    expect(result.recipeCount).toBe(12);
+  });
+
+  // 404, not 403: a non-owner shouldn't learn the id exists. Public-ness is irrelevant here —
+  // this route answers "is it mine", and the public one already serves everyone else.
+  it('404s a collection owned by somebody else, public or not', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+
+    await expect(getMyCollectionById('collection-uuid', 'user_other')).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });
@@ -333,7 +378,7 @@ describe('getCollectionById()', () => {
   it('throws COLLECTION_NOT_FOUND when collection does not exist', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
 
-    await expect(getCollectionById('missing-id')).rejects.toMatchObject({
+    await expect(getMyCollectionById('missing-id', 'user_owner')).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });

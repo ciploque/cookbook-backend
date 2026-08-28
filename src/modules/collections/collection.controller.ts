@@ -9,13 +9,12 @@ import {
   UpdateCollectionInput,
 } from './collection.schema';
 
+// Public collections only, identically for every caller — the owner's full library is on the
+// /users/me/collections routes below.
 export async function listCollectionsByUser(req: Request, res: Response): Promise<void> {
-  // req.user is populated by optionalAuthenticate — undefined for an anonymous caller, in
-  // which case the service returns public collections only.
   const result = await collectionService.listCollectionsByUser(
     req.params.userId as string,
     req.query as unknown as CollectionQuery,
-    req.user?.sub,
   );
   res.json({ success: true, ...result });
 }
@@ -29,9 +28,14 @@ export async function listMyCollections(req: Request, res: Response): Promise<vo
 }
 
 export async function getCollectionById(req: Request, res: Response): Promise<void> {
-  const collection = await collectionService.getCollectionById(
+  const collection = await collectionService.getCollectionById(req.params.collectionId as string);
+  res.json({ success: true, data: collection });
+}
+
+export async function getMyCollectionById(req: Request, res: Response): Promise<void> {
+  const collection = await collectionService.getMyCollectionById(
     req.params.collectionId as string,
-    req.user?.sub,
+    req.user!.sub,
   );
   res.json({ success: true, data: collection });
 }

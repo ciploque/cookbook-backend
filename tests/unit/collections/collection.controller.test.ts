@@ -17,6 +17,7 @@ vi.mock('../../../src/modules/collections/collection.service', () => ({
   listCollectionsByUser: vi.fn(),
   listMyCollections: vi.fn(),
   getCollectionById: vi.fn(),
+  getMyCollectionById: vi.fn(),
   createCollection: vi.fn(),
   updateCollection: vi.fn(),
   patchCollection: vi.fn(),
@@ -67,25 +68,26 @@ beforeEach(() => {
 // ─── Reads ────────────────────────────────────────────────────────────────────
 
 describe('GET /collections/:collectionId', () => {
-  it('serves an anonymous caller with an undefined viewer sub', async () => {
+  it('serves an anonymous caller', async () => {
     vi.mocked(collectionService.getCollectionById).mockResolvedValue(collection as never);
 
     const res = await api().get(`/collections/${COLLECTION_ID}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: collection });
-    expect(collectionService.getCollectionById).toHaveBeenCalledWith(COLLECTION_ID, undefined);
+    expect(collectionService.getCollectionById).toHaveBeenCalledWith(COLLECTION_ID);
   });
 
-  it('forwards the caller sub when a session is present', async () => {
+  // No caller identity reaches this route at all — it runs no auth middleware, so a session
+  // can't change the answer. That's the whole point of the split with the /me route.
+  it('passes no caller to the service even when a session is present', async () => {
     vi.mocked(collectionService.getCollectionById).mockResolvedValue(collection as never);
 
     await api()
       .get(`/collections/${COLLECTION_ID}`)
       .set(...AUTH);
 
-    // The owner's own private collection is only visible because this sub reaches the service.
-    expect(collectionService.getCollectionById).toHaveBeenCalledWith(COLLECTION_ID, 'user_owner');
+    expect(collectionService.getCollectionById).toHaveBeenCalledWith(COLLECTION_ID);
   });
 
   it('surfaces the private-collection 404 rather than a 403', async () => {
@@ -113,16 +115,14 @@ describe('GET /users/:userId/collections vs /users/me/collections', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: [collection], meta });
-    // Third arg is the viewer sub: optionalAuthenticate leaves it undefined for an anonymous
-    // caller, which is what makes the service fall back to public collections only.
     expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
       USER_ID,
       expect.objectContaining({ page: 1, limit: 20 }),
-      undefined,
     );
   });
 
-  it('the by-id route forwards the caller sub when a session is present', async () => {
+  // Same pin as on GET /collections/:collectionId — a session must not widen a public list.
+  it('the by-id route passes no caller even when a session is present', async () => {
     vi.mocked(collectionService.listCollectionsByUser).mockResolvedValue({
       data: [collection],
       meta,
@@ -136,7 +136,6 @@ describe('GET /users/:userId/collections vs /users/me/collections', () => {
     expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
       USER_ID,
       expect.anything(),
-      'user_owner',
     );
   });
 
@@ -160,6 +159,53 @@ describe('GET /users/:userId/collections vs /users/me/collections', () => {
 
     expect(res.status).toBe(401);
     expect(collectionService.listMyCollections).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /users/me/collections/:collectionId', () => {
+  it('resolves the owner from the session and returns the collection', async () => {
+    vi.mocked(collectionService.getMyCollectionById).mockResolvedValue(collection as never);
+
+    const res = await api()
+      .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: collection });
+    expect(collectionService.getMyCollectionById).toHaveBeenCalledWith(COLLECTION_ID, 'user_owner');
+  });
+
+  // Unlike the public detail route, identity is required here rather than optional — that is
+  // what lets it answer with a private collection at all.
+  it('requires a session', async () => {
+    const res = await api().get(`/users/me/collections/${COLLECTION_ID}`);
+
+    expect(res.status).toBe(401);
+    expect(collectionService.getMyCollectionById).not.toHaveBeenCalled();
+  });
+
+  it('is not swallowed by the /:userId/collections wildcard', async () => {
+    vi.mocked(collectionService.getMyCollectionById).mockResolvedValue(collection as never);
+
+    await api()
+      .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the not-mine 404 as the error envelope', async () => {
+    const { ApiError } = await import('../../../src/utils/ApiError');
+    vi.mocked(collectionService.getMyCollectionById).mockRejectedValue(
+      ApiError.notFound('Collection'),
+    );
+
+    const res = await api()
+      .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('COLLECTION_NOT_FOUND');
   });
 });
 

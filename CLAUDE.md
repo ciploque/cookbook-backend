@@ -268,20 +268,32 @@ See `.env.example` for all values. `src/config/env.ts` validates them with Zod a
 
 ### Optional Auth (`optionalAuthenticate`)
 
-Some routes are readable by anyone but need to know *who's asking* to shape the response — e.g. `GET /collections/:collectionId` shows a private collection to its owner but 404s it for everyone else. These routes don't run `authenticate` (that would incorrectly reject anonymous requests to what's a public-by-default endpoint). Instead they run `optionalAuthenticate`, which resolves `getAuth(req)` the same way `authenticate` does but **never rejects**: it sets `req.user` when a valid session (or dev-bypass header) is present, and just calls `next()` unauthenticated otherwise — including when `getAuth` throws on a malformed token. Downstream service code reads `req.user?.sub` and treats `undefined` as "anonymous."
+Some routes are readable by anyone but need to know *who's asking* to shape the response — e.g. `GET /recipes/:recipeId` returns the same recipe to everyone, plus a `hasReviewed` flag describing the caller. These routes don't run `authenticate` (that would incorrectly reject anonymous requests to what's a public-by-default endpoint). Instead they run `optionalAuthenticate`, which resolves `getAuth(req)` the same way `authenticate` does but **never rejects**: it sets `req.user` when a valid session (or dev-bypass header) is present, and just calls `next()` unauthenticated otherwise — including when `getAuth` throws on a malformed token. Downstream service code reads `req.user?.sub` and treats `undefined` as "anonymous."
 
 Routes using it:
 
 | Route | What the caller's identity changes |
 |---|---|
-| `GET /collections/:collectionId` | A private collection is visible to its owner, `404` for everyone else |
 | `GET /recipes/:recipeId` | Adds the viewer-scoped `hasReviewed` / `isSavedInCollection` flags |
 | `GET /users/:username/recipes/:recipename` | Same flags as above — identical detail shape |
 | `GET /recipes` | Adds an accurate per-item `isSavedInCollection` flag (batched, one query for the whole page) |
 | `GET /users/:userId/recipes` | Same as above — delegates to the same `listRecipes()` |
-| `GET /users/:userId` | The profile's own owner sees their private collections counted in `collectionCount` |
-| `GET /users/username/:username` | Same as above — identical profile shape |
-| `GET /users/:userId/collections` | The owner gets their private collections in the list, not just the public ones |
+
+**Where the line is.** `optionalAuthenticate` may *annotate* a public response with the caller's own
+relationship to it — the four flags above are all "have *you* reviewed / saved this". It must never
+*unlock* data a stranger can't see. That distinction was not always drawn: four public reads used to
+widen their answer when the caller happened to be the owner (a private collection appeared, a
+`collectionCount` grew). Those all moved to explicit `/me` routes under `authenticate`:
+
+| Public route — one answer for everybody | Owner-scoped counterpart |
+|---|---|
+| `GET /users/:userId` · `GET /users/username/:username` | `GET /users/me` |
+| `GET /users/:userId/collections` | `GET /users/me/collections` |
+| `GET /collections/:collectionId` | `GET /users/me/collections/:collectionId` |
+
+The reasoning: a public URL that returns two different bodies to two different callers is a privacy
+rule enforced inside a read path instead of at the door, and it makes the endpoint look cacheable
+when it isn't. Privileged data gets a route that proves identity.
 
 Do not reach for `req.user?.sub` on a route that hasn't run either `authenticate` or `optionalAuthenticate` — `req.user` is never populated by `clerkMiddleware()` alone, only by one of these two.
 
@@ -350,7 +362,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 | Limiter | Max | Applied to |
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), `${base}/v1/categories` (read-only router — the curated registry), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), `${base}/v1/categories` (read-only router — the curated registry), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` (including its two authenticated `me` reads, `GET /users/me/collections` and `GET /users/me/collections/:collectionId` — reads, so they keep this router's limiter rather than the collections module's `writeLimiter`) |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -395,12 +407,12 @@ All responses use a consistent shape:
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/users/me` | Required | Provision user profile (idempotent) |
-| GET | `/users/me` | Required | Get own profile |
+| GET | `/users/me` | Required | Get own profile — the only profile read with a private-inclusive `collectionCount` |
 | PUT | `/users/me` | Required | Update own profile |
-| GET | `/users/:userId` | Public* | Get public user profile by DB id |
-| GET | `/users/username/:username` | Public* | Get public user profile by username (pretty-URL alternative to the above; same response shape) |
+| GET | `/users/:userId` | Public | Get public user profile by DB id |
+| GET | `/users/username/:username` | Public | Get public user profile by username (pretty-URL alternative to the above; same response shape) |
 
-*Both public profile GETs run `optionalAuthenticate`, not `authenticate` — anonymous requests are served normally, but a session belonging to the profile's own user makes `collectionCount` include their private collections. See [Public Profile Counts](#public-profile-counts) below and [Optional Auth](#optional-auth-optionalauthenticate).
+The two public GETs run **no auth middleware at all** — same body for every caller, signed in or not. `GET /users/me` is their owner-scoped counterpart. See [Public Profile Counts](#public-profile-counts) below.
 
 #### POST /users/me
 
@@ -449,33 +461,40 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 }
 ```
 
-**Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses, which instead add the two count fields below.
+**Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses. Those two, and `GET /users/me`, all add the two count fields below.
 
 #### Public Profile Counts
 
-The two public profile GETs return two extra fields the authenticated `/users/me` routes do not:
+Three routes return two extra count fields:
 
 ```json
 { "recipeCount": 42, "collectionCount": 7 }
 ```
 
-They're on the public shape only — `POST`/`GET`/`PUT /users/me` return the raw user row without
-them, since a profile page is the only surface that needs the totals and `/users/me` callers can
-page the list endpoints directly.
-
-**`recipeCount`** is the user's total authored recipes, the same number for every caller:
+**`recipeCount`** is the user's total authored recipes, the same number everywhere:
 `Recipe` has no visibility flag, so there is no private subset to hide.
 
-**`collectionCount`** is viewer-scoped, the way `isSavedInCollection` is on recipes: it counts
-**public collections only**, unless the caller *is* the profile's user — then their private
-collections are counted too, so the number agrees with what `GET /users/me/collections` returns
-them. Signing in as somebody else changes nothing; only being the profile owner does.
+**`collectionCount`** is where the routes differ, and it's the whole reason `GET /users/me` carries
+these fields at all:
 
-Both resolve as Prisma `_count` selects inside the single `findUnique` that already fetches the
-user — no extra round trip. The owner check rides along in the count's own `where` rather than
-branching after the fetch: the counted rows already belong to the profile user, so
-`OR: [{ isPublic: true }, { owner: { authProviderId: <caller> } }]` is true for the private ones
-exactly when the caller is that user (`collectionCountFilter` in `user.service.ts`).
+| Route | `collectionCount` |
+|---|---|
+| `GET /users/:userId` · `GET /users/username/:username` | **Public collections only** — the same number for every caller, the profile's own user included |
+| `GET /users/me` | **Unfiltered** — public *and* private, agreeing with what `GET /users/me/collections` lists |
+
+The public GETs are not viewer-scoped in any way: they run no auth middleware, so no session can
+widen the count. A signed-in user reading their own profile page must call `GET /users/me` to see
+their private collections counted — the route that proves identity rather than inferring it from
+whoever happens to be asking. (This was previously owner-aware on the public routes; see the
+"where the line is" note under [Optional Auth](#optional-auth-optionalauthenticate) for why it moved.)
+
+Both counts resolve as Prisma `_count` selects inside the single `findUnique` that already fetches
+the user — no extra round trip on either route. The public one carries a fixed
+`collections: { where: { isPublic: true } }` (`publicUserCounts` in `user.service.ts`); `getMe`
+simply omits the `where`.
+
+`POST`/`PUT /users/me` are unaffected and still return the plain user row — they're writes, not the
+profile read surface.
 
 **`bio` vs `about`:** two independent optional fields, both update-only (neither is accepted by
 `POST /users/me` — provisioning takes `username`/`displayName`/`avatarUrl`, and the rest is
@@ -971,9 +990,10 @@ reports a recipe can never report it again.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/users/:userId/collections` | Public* | List a user's public collections — plus their private ones when the caller is that user |
+| GET | `/users/:userId/collections` | Public | List a user's **public** collections |
 | GET | `/users/me/collections` | Required | List all (public + private) collections owned by the authenticated user |
-| GET | `/collections/:collectionId` | Public* | Get single collection with ordered recipes (first 50 only — see note below) |
+| GET | `/collections/:collectionId` | Public | Get a single **public** collection with ordered recipes (first 50 only — see note below) |
+| GET | `/users/me/collections/:collectionId` | Required | Same detail shape for a collection the caller owns, public or private |
 | POST | `/collections` | Required | Create collection (metadata only) |
 | PUT | `/collections/:collectionId` | Required + Owner | Full metadata update |
 | PATCH | `/collections/:collectionId` | Required + Owner | Partial metadata update |
@@ -983,13 +1003,45 @@ reports a recipe can never report it again.
 | POST | `/collections/:collectionId/follow` | Required, not owner | Follow public collection |
 | DELETE | `/collections/:collectionId/follow` | Required | Unfollow |
 
-*Private collections: 404 when a non-owner accesses `GET /collections/:collectionId` directly. That route runs `optionalAuthenticate` (not `authenticate`) so an owner's own valid session is recognized without rejecting anonymous requests — see [Optional Auth](#optional-auth-optionalauthenticate). `GET /users/:userId/collections` runs `optionalAuthenticate` for the same reason: it returns public collections to anyone, and the full set (public + private) when the caller's session belongs to the user being listed — matching the `collectionCount` rule in [Public Profile Counts](#public-profile-counts), so a profile page's number and list never disagree.
+**Private collections are invisible to the two public routes, without exception.** Neither runs any
+auth middleware, so a private collection is a `404 COLLECTION_NOT_FOUND` for every caller — its owner
+included — and `GET /users/:userId/collections` lists public collections only, whoever is asking.
 
-`GET /users/:userId/collections` and `GET /users/me/collections` remain deliberately separate endpoints rather than one route: the `/me` form needs no id at all and always means "the caller's own", so it requires a valid session and is the natural call for a signed-in user's own library, while the id form is how *anyone* addresses a specific user's profile. Both now return the same set when the caller is that user — see the note on `userCollectionsRouter` route registration order below.
+Each public route has an owner-scoped counterpart that requires a session and answers with the
+caller's own collections, public and private alike:
 
-**Route registration order:** `GET /users/me/collections` is registered **before** `GET /users/:userId/collections` in `userCollectionsRouter` (`collection.router.ts`) so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`.
+| Public — one answer for everybody | Owner-scoped counterpart |
+|---|---|
+| `GET /users/:userId/collections` | `GET /users/me/collections` |
+| `GET /collections/:collectionId` | `GET /users/me/collections/:collectionId` |
 
-**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
+The `/me` pair needs no id to identify the user and always means "the caller's own", so it requires a
+valid session; the public pair is how *anyone* addresses a specific user's profile. See the "where
+the line is" note under [Optional Auth](#optional-auth-optionalauthenticate) for why the two were
+split apart instead of one route serving both.
+
+#### GET /users/me/collections/:collectionId
+
+The caller's own collection by id, in the exact [Collection Object Shape](#collection-object-shape)
+`GET /collections/:collectionId` returns — same 50-recipe cap, same `coverImages`/`recipeCount`.
+Public-ness is irrelevant here: the question this route answers is "is it mine", and the public route
+already serves everyone else.
+
+A collection the caller doesn't own is a **`404`, not a `403`** — a non-owner shouldn't learn the id
+exists. That's the same stance the public route takes on a private collection, and it's why this
+route uses an explicit ownership check in the service rather than the `authorize()` owner guard the
+write routes use (that guard deliberately returns `403` on a mismatch, which is right for a write and
+wrong for a read).
+
+Reuses `collectionParamsSchema` for params validation — `collectionId` is the route's only param, so
+it satisfies the "declare every param" rule in [Route Param Validation](#route-param-validation).
+
+**Errors:** `401 UNAUTHORIZED` · `404 COLLECTION_NOT_FOUND` (absent, or not the caller's) ·
+`422 VALIDATION_ERROR` on a non-UUID `collectionId`.
+
+**Route registration order:** both `me` routes are registered **before** `GET /users/:userId/collections` in `userCollectionsRouter` (`collection.router.ts`) so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`. (`/me/collections/:collectionId` has one more path segment than `/:userId/collections`, so it couldn't actually collide — the ordering is for consistency, and `/me/collections` genuinely needs it.)
+
+**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections` / `GET /users/me/collections/:collectionId`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
 
 #### POST /collections — Request Body
 
@@ -1686,7 +1738,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (541 passing)
+### Unit Tests (547 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1695,7 +1747,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/ApiError.test.ts` | 12 | All static factory methods, prototype chain, code/statusCode mapping, multi-word (2 and 3+) resource names in `notFound()` |
 | `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
-| `tests/unit/users/user.service.test.ts` | 36 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById/getUserByUsername (`authProviderId` **and** `_count` stripped, `recipeCount`/`collectionCount` surfaced from the relation counts, collection count filter is `{ isPublic: true }` for an anonymous caller and the owner-`OR` form for a signed-in one, not found), provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
+| `tests/unit/users/user.service.test.ts` | 36 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe (both counts returned with `_count` stripped, collections counted **unfiltered**, not found), updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById/getUserByUsername (`authProviderId` **and** `_count` stripped, `recipeCount`/`collectionCount` surfaced from the relation counts, collection count filter is always `{ isPublic: true }` — pinned by calling through a widened signature with a caller sub and asserting the filter doesn't budge, not found), provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
 | `tests/unit/recipes/recipe.service.test.ts` | 70 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
 | `tests/unit/recipes/recipe.controller.test.ts` | 21 | Real recipe routers on a bare Express app, service mocked — pins the HTTP contract: the `{ success, data }` / `{ success, data, meta }` envelope with `meta` beside `data` (not nested), query defaults coerced (`minRating` a number, not `"4"`), a service 404 surfacing as the error envelope rather than a 500, `201` on create with the author taken from the session (never the body), `coverImageUrl`/`imageUrls` stripped from a create body, `401` before the service on an unauthenticated create, `403` before the service when the caller is not the author, `204` with an empty body on delete, and the image routes (buffers forwarded in order, `422` with a field-level message when no file is attached) |
 | `tests/unit/recipes/recipe.schema.test.ts` | 11 | `categories` lowercased/trimmed per slug on write, defaults to `[]`, capped at 5, rejects empty slugs; `category` filter still lowercased/trimmed (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs; `videoUrl` host allowlist; `authorNote` cap |
@@ -1710,9 +1762,9 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
 | `tests/unit/reviews/review.controller.test.ts` | 18 | Real review routers on a bare Express app, service mocked — the paginated envelope, `filter`/`order` forwarded and an unsupported `filter` rejected with 422, `GET /recipes/:recipeId/reviews/summary` not shadowed by the list route, `GET …/reviews/me` resolving the caller from the session and requiring auth (unlike its two sibling reads), `201` on create with the author from the session, a client-supplied `imageUrls` stripped, the duplicate-review conflict surfacing as 409, `recipeId` stripped from a `PUT` body so a review can't be moved between recipes, `403` before the service for a non-author, `204` on delete, and the image routes |
 | `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
-| `tests/unit/collections/collection.service.test.ts` | 40 | listCollectionsByUser (public-filtered for an anonymous caller and for a signed-in non-owner, unfiltered when the caller is the listed user, ownership resolved from the target user row, user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private own, private forbidden, not found, carries both new shared-shape fields), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
-| `tests/unit/routers/paramsValidation.test.ts` | 41 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), including the two public profile GETs and `GET /users/:userId/collections`; `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
-| `tests/unit/collections/collection.controller.test.ts` | 20 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, the viewer sub forwarded (or left `undefined`) on `GET /collections/:collectionId` and `GET /users/:userId/collections`, the `me` route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
+| `tests/unit/collections/collection.service.test.ts` | 43 | listCollectionsByUser (always public-filtered — including when the listed user is themselves the caller, pinned through a widened signature; the target user is looked up only to 404 an unknown id; user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private → 404 **even for its owner**, not found, carries both shared-shape fields), getMyCollectionById (own private, own public, another user's → 404 not 403, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/routers/paramsValidation.test.ts` | 40 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 25 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route (the four recipe ones) forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), while the public profile/collection reads pass **no** caller at all, session or not; `GET /users/me`, `/users/me/collections`, `/users/me/collections/:collectionId`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
+| `tests/unit/collections/collection.controller.test.ts` | 24 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, **no** caller reaching the service on `GET /collections/:collectionId` and `GET /users/:userId/collections` even with a session attached, `GET /users/me/collections/:collectionId` taking its sub from the session / 401ing without one / not being swallowed by the `:userId` wildcard / surfacing the not-mine 404, the `me` list route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
 | `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
 | `tests/unit/shelves/shelf.service.test.ts` | 17 | listActiveShelves (active + publish-window predicate, position/item ordering, empty shelves omitted, `criteria` never leaked, list items formatted by the shared recipe mapper), getShelfBySlug (pagination + meta, 404 unknown slug, 404 out-of-window via the same predicate), refreshShelf (atomic delete+insert+`refreshedAt` in one `$transaction`, order follows resolver output, resolver called with source/criteria/maxItems, 404), refreshAllShelves (one failing shelf doesn't abort the batch; single-slug mode skips the findMany), syncShelvesFromConfig (created vs updated counts, deletes shelves absent from config, rejects malformed definition/bad criteria/duplicate slug **before** any write) |

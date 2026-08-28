@@ -20,13 +20,14 @@ export async function updateMe(req: Request, res: Response): Promise<void> {
   res.json({ success: true, data: user });
 }
 
+// Public information only — the response is identical for every caller, which is why these two
+// run no auth middleware at all. Owner-scoped profile data lives on GET /users/me.
 export async function getUserById(req: Request, res: Response): Promise<void> {
-  // req.user is populated by optionalAuthenticate — undefined for an anonymous caller.
-  const user = await userService.getUserById(req.params.userId as string, req.user?.sub);
+  const user = await userService.getUserById(req.params.userId as string);
   res.json({ success: true, data: user });
 }
 
 export async function getUserByUsername(req: Request, res: Response): Promise<void> {
-  const user = await userService.getUserByUsername(req.params.username as string, req.user?.sub);
+  const user = await userService.getUserByUsername(req.params.username as string);
   res.json({ success: true, data: user });
 }

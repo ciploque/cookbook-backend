@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, optionalAuthenticate } from '../../middlewares/authenticate';
+import { authenticate } from '../../middlewares/authenticate';
 import { authorize } from '../../middlewares/authorize';
 import { validate } from '../../middlewares/validate';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -9,6 +9,7 @@ import {
   deleteCollection,
   followCollection,
   getCollectionById,
+  getMyCollectionById,
   listCollectionsByUser,
   listMyCollections,
   patchCollection,
@@ -36,14 +37,9 @@ const ownerGuard = authorize((req) => getOwnerId(req.params.collectionId as stri
 // P2023 (a 500) instead of a clean 422. See collection.schema.ts.
 const validateCollectionId = validate(collectionParamsSchema, 'params');
 
-// Public — optionalAuthenticate populates req.user (if a valid session is present) so the
-// owner can see their own private collection; it never rejects an unauthenticated request.
-router.get(
-  '/:collectionId',
-  validateCollectionId,
-  optionalAuthenticate,
-  asyncHandler(getCollectionById),
-);
+// Fully public — no auth middleware, and a private collection is a 404 for every caller. The
+// owner reaches their own through GET /users/me/collections/:collectionId below.
+router.get('/:collectionId', validateCollectionId, asyncHandler(getCollectionById));
 
 // Metadata CRUD
 router.post(
@@ -121,12 +117,19 @@ userCollectionsRouter.get(
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listMyCollections),
 );
-// Public — optionalAuthenticate lets the owner see their own private collections here too,
-// without rejecting anonymous callers.
+// The owner-scoped counterpart to GET /collections/:collectionId — the caller's own collection,
+// public or private. Reuses collectionParamsSchema: collectionId is this route's only param, so
+// it satisfies the "declare every param" rule (see CLAUDE.md → Route Param Validation).
+userCollectionsRouter.get(
+  '/me/collections/:collectionId',
+  authenticate,
+  validate(collectionParamsSchema, 'params'),
+  asyncHandler(getMyCollectionById),
+);
+// Fully public — no auth middleware, public collections only, the same list for every caller.
 userCollectionsRouter.get(
   '/:userId/collections',
   validate(userCollectionsParamsSchema, 'params'),
-  optionalAuthenticate,
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listCollectionsByUser),
 );

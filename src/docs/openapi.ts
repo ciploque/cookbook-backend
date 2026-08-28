@@ -61,10 +61,20 @@ const PublicUserSchema = registry.register(
     avatarUrl: z.string().nullable(),
     // Total recipes authored. Unfiltered — Recipe has no visibility flag.
     recipeCount: z.number().int(),
-    // Public collections only, unless the caller is this user — then private ones count too.
+    // Public collections only, for every caller. The private-inclusive count is on GET /users/me.
     collectionCount: z.number().int(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
+  }),
+);
+
+// GET /users/me only — POST/PUT /users/me return the plain User row. `collectionCount` here is
+// unfiltered (public + private): the route authenticates the caller, so it may count both.
+const UserWithCountsSchema = registry.register(
+  'UserWithCounts',
+  UserSchema.extend({
+    recipeCount: z.number().int(),
+    collectionCount: z.number().int(),
   }),
 );
 
@@ -374,12 +384,19 @@ registry.registerPath({
   path: '/api/v1/users/me',
   tags: ['Users'],
   summary: 'Get own profile',
+  description:
+    "The authenticated caller's own profile, including `recipeCount` and an unfiltered " +
+    '`collectionCount` (public **and** private). The public profile GETs count public ' +
+    'collections only — this is the route that proves identity, so it is the one that may ' +
+    'count both.',
   security: [{ bearerAuth: [] }],
   responses: {
     200: {
-      description: 'Authenticated user profile',
+      description: 'Authenticated user profile with counts',
       content: {
-        'application/json': { schema: z.object({ success: z.literal(true), data: UserSchema }) },
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: UserWithCountsSchema }),
+        },
       },
     },
     401: {
@@ -430,9 +447,8 @@ registry.registerPath({
   tags: ['Users'],
   summary: 'Get public user profile',
   description:
-    'Auth is optional. Anonymous callers are served normally; a valid session belonging to this ' +
-    'same user makes `collectionCount` include their private collections.',
-  security: [{ bearerAuth: [] }, {}],
+    'Fully public — the same body for every caller. `collectionCount` counts public collections ' +
+    'only; the profile owner gets their private ones counted on GET /users/me.',
   request: {
     params: z.object({ userId: z.string().uuid() }),
   },
@@ -463,9 +479,7 @@ registry.registerPath({
   summary: 'Get public user profile by username',
   description:
     'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route. ' +
-    'Auth is optional: a valid session belonging to this same user makes `collectionCount` ' +
-    'include their private collections.',
-  security: [{ bearerAuth: [] }, {}],
+    'Fully public, identical response shape and rules — see that route.',
   request: {
     params: z.object({ username: z.string() }),
   },
@@ -1248,20 +1262,17 @@ registry.registerPath({
   method: 'get',
   path: '/api/v1/users/{userId}/collections',
   tags: ['Collections'],
-  summary: "List a user's collections",
+  summary: "List a user's public collections",
   description:
-    'Public collections only. Auth is optional: a valid session belonging to this same user ' +
-    'returns their private collections as well.',
-  security: [{ bearerAuth: [] }, {}],
+    'Fully public — public collections only, the same list for every caller. The owner gets ' +
+    'their full library (public + private) from GET /users/me/collections.',
   request: {
     params: z.object({ userId: z.string().uuid() }),
     query: collectionQuerySchema,
   },
   responses: {
     200: {
-      description:
-        "Paginated list of the user's public collections — plus their private ones when the " +
-        'caller is that user',
+      description: "Paginated list of the user's public collections",
       content: {
         'application/json': {
           schema: z.object({
@@ -1319,9 +1330,49 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/api/v1/users/me/collections/{collectionId}',
+  tags: ['Collections'],
+  summary: 'Get one of the authenticated user’s own collections',
+  description:
+    'The owner-scoped counterpart to GET /collections/{collectionId}: returns the caller’s own ' +
+    'collection whether it is public or private. A collection the caller does not own is a 404, ' +
+    'not a 403 — a non-owner should not learn the id exists.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ collectionId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: 'Collection detail',
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'Collection not found, or not owned by the caller',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    422: {
+      description: 'Invalid path parameter',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/api/v1/collections/{collectionId}',
   tags: ['Collections'],
-  summary: 'Get collection by ID',
+  summary: 'Get public collection by ID',
+  description:
+    'Fully public. A private collection is a 404 for every caller, its owner included — the ' +
+    'owner reads their own through GET /users/me/collections/{collectionId}.',
   request: {
     params: z.object({ collectionId: z.string().uuid() }),
   },

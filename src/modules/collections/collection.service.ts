@@ -79,26 +79,16 @@ async function paginateCollections(
   };
 }
 
-// Public-only for a visitor, but the full set when the caller *is* the user being listed —
-// so a profile page reached by id shows its owner the same collections /users/me/collections does.
-export async function listCollectionsByUser(
-  userId: string,
-  query: CollectionQuery,
-  viewerAuthProviderId?: string,
-) {
+// Public collections only, for every caller — a profile page reached by id shows the same list to
+// its owner as to a stranger. The owner's full library is at /users/me/collections.
+export async function listCollectionsByUser(userId: string, query: CollectionQuery) {
   const targetUser = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, authProviderId: true },
+    select: { id: true },
   });
   if (!targetUser) throw ApiError.notFound('User');
 
-  const isOwner = !!viewerAuthProviderId && viewerAuthProviderId === targetUser.authProviderId;
-
-  return paginateCollections(
-    { ownerId: userId, ...(isOwner ? {} : { isPublic: true }) },
-    query.page,
-    query.limit,
-  );
+  return paginateCollections({ ownerId: userId, isPublic: true }, query.page, query.limit);
 }
 
 export async function listMyCollections(authProviderId: string, query: CollectionQuery) {
@@ -111,18 +101,30 @@ export async function listMyCollections(authProviderId: string, query: Collectio
   return paginateCollections({ ownerId: owner.id }, query.page, query.limit);
 }
 
-export async function getCollectionById(collectionId: string, requestingAuthProviderId?: string) {
+// Public collections only. A private one is a 404 for everyone, the owner included — they reach
+// it through getMyCollectionById below, on a route that authenticates them first.
+export async function getCollectionById(collectionId: string) {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
     include: collectionInclude,
   });
 
-  if (!collection) throw ApiError.notFound('Collection');
+  if (!collection || !collection.isPublic) throw ApiError.notFound('Collection');
 
-  if (!collection.isPublic) {
-    const isOwner =
-      !!requestingAuthProviderId && requestingAuthProviderId === collection.owner.authProviderId;
-    if (!isOwner) throw ApiError.notFound('Collection');
+  return formatCollection(collection);
+}
+
+// The owner-scoped counterpart: any collection the caller owns, public or private. A collection
+// they don't own is a 404 rather than a 403 — a non-owner shouldn't learn the id exists, which is
+// the same stance getCollectionById takes on a private one.
+export async function getMyCollectionById(collectionId: string, authProviderId: string) {
+  const collection = await prisma.collection.findUnique({
+    where: { id: collectionId },
+    include: collectionInclude,
+  });
+
+  if (!collection || collection.owner.authProviderId !== authProviderId) {
+    throw ApiError.notFound('Collection');
   }
 
   return formatCollection(collection);

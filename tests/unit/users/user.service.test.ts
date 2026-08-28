@@ -141,13 +141,29 @@ describe('provisionUser()', () => {
 // ─── getMe ───────────────────────────────────────────────────────────────────
 
 describe('getMe()', () => {
-  it('returns the user when found by authProviderId', async () => {
-    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
+  // Prisma returns the counts under `_count`; the service flattens them onto the payload.
+  const mockMeRow = { ...mockUser, _count: { recipes: 42, collections: 7 } };
+
+  it('returns the user with both counts, and without the raw _count', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockMeRow);
 
     const result = await getMe('user_abc');
 
-    expect(result).toEqual(mockUser);
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { authProviderId: 'user_abc' } });
+    expect(result).toEqual({ ...mockUser, recipeCount: 42, collectionCount: 7 });
+    expect(result).not.toHaveProperty('_count');
+  });
+
+  // The one route that proves the caller *is* this user, so the only one that may count their
+  // private collections — hence no `where` on the collections count at all.
+  it('counts collections unfiltered (public and private alike)', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockMeRow);
+
+    await getMe('user_abc');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { authProviderId: 'user_abc' },
+      include: { _count: { select: { recipes: true, collections: true } } },
+    });
   });
 
   it('throws USER_NOT_FOUND (404) when user does not exist', async () => {
@@ -234,11 +250,9 @@ describe('updateMe()', () => {
 // counts the way Prisma would return them.
 const mockUserWithCounts = { ...mockUser, _count: { recipes: 42, collections: 7 } };
 
-// The `collections` count filter as the service builds it for each kind of caller.
+// The `collections` count filter — public-only, unconditionally. These two routes take no
+// caller at all now; the private-inclusive count lives on getMe().
 const PUBLIC_ONLY = { isPublic: true };
-const ownerVisible = (sub: string) => ({
-  OR: [{ isPublic: true }, { owner: { authProviderId: sub } }],
-});
 
 const countInclude = (collectionsWhere: unknown) => ({
   _count: { select: { recipes: true, collections: { where: collectionsWhere } } },
@@ -265,7 +279,7 @@ describe('getUserById()', () => {
     expect(result.collectionCount).toBe(7);
   });
 
-  it('counts public collections only for an anonymous caller', async () => {
+  it('counts public collections only', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
 
     await getUserById('user-uuid-1');
@@ -276,14 +290,19 @@ describe('getUserById()', () => {
     });
   });
 
-  it('counts private collections too when the caller is the profile owner', async () => {
+  // The signature takes no caller — pinned here so nobody reintroduces an owner-aware branch
+  // by threading a sub through as a second argument.
+  it('ignores any extra argument: the filter never widens for a caller', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
 
-    await getUserById('user-uuid-1', 'user_abc');
+    await (getUserById as (id: string, sub?: string) => Promise<unknown>)(
+      'user-uuid-1',
+      'user_abc',
+    );
 
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: 'user-uuid-1' },
-      include: countInclude(ownerVisible('user_abc')),
+      include: countInclude(PUBLIC_ONLY),
     });
   });
 
@@ -322,28 +341,15 @@ describe('getUserByUsername()', () => {
     expect(result.collectionCount).toBe(7);
   });
 
-  it('counts private collections too when the caller is the profile owner', async () => {
+  // Same pin as on getUserById: this route answers one body, and no caller can widen it.
+  it('ignores any extra argument: the filter never widens for a caller', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
 
-    await getUserByUsername('joao', 'user_abc');
+    await (getUserByUsername as (u: string, sub?: string) => Promise<unknown>)('joao', 'user_abc');
 
     expect(prisma.user.findUnique).toHaveBeenCalledWith({
       where: { username: 'joao' },
-      include: countInclude(ownerVisible('user_abc')),
-    });
-  });
-
-  // Being signed in isn't enough — only being *this* profile's user widens the count. The
-  // filter is identical for a stranger and the owner alike; it's the OR clause that can only
-  // match rows owned by the caller, so a different sub simply never matches.
-  it('builds the same owner-OR filter for a signed-in stranger (no row can match it)', async () => {
-    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
-
-    await getUserByUsername('joao', 'user_someone_else');
-
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { username: 'joao' },
-      include: countInclude(ownerVisible('user_someone_else')),
+      include: countInclude(PUBLIC_ONLY),
     });
   });
 

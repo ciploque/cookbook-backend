@@ -38,10 +38,23 @@ export async function provisionUser(
   }
 }
 
-export async function getMe(authProviderId: string): Promise<User> {
-  const user = await prisma.user.findUnique({ where: { authProviderId } });
+// The authenticated caller's own profile. Unlike the public GETs, `collectionCount` here is
+// unfiltered — this is the only route that proves the caller *is* the user, so it's the only
+// one that may count their private collections.
+export type MeWithCounts = User & {
+  recipeCount: number;
+  collectionCount: number;
+};
+
+export async function getMe(authProviderId: string): Promise<MeWithCounts> {
+  const user = await prisma.user.findUnique({
+    where: { authProviderId },
+    include: { _count: { select: { recipes: true, collections: true } } },
+  });
   if (!user) throw ApiError.notFound('User');
-  return user;
+
+  const { _count, ...me } = user;
+  return { ...me, recipeCount: _count.recipes, collectionCount: _count.collections };
 }
 
 export async function updateMe(authProviderId: string, input: UpdateUserInput): Promise<User> {
@@ -72,29 +85,19 @@ export type PublicUserWithCounts = Omit<User, 'authProviderId'> & {
   collectionCount: number;
 };
 
-// A collection counts towards the profile's `collectionCount` if it's public, or if the viewer
-// *is* the profile owner. The counted rows already belong to the profile user, so the second
-// clause is true exactly when viewer === profile owner — which resolves both cases inside the
-// same query instead of fetching the row first and then branching on it.
-function collectionCountFilter(viewerAuthProviderId?: string): Prisma.CollectionWhereInput {
-  return viewerAuthProviderId
-    ? { OR: [{ isPublic: true }, { owner: { authProviderId: viewerAuthProviderId } }] }
-    : { isPublic: true };
-}
-
+// A public profile answers the same body to every caller, signed in or not: `collectionCount`
+// counts public collections only. The private-inclusive number is owner-scoped, so it lives on
+// GET /users/me, which proves identity instead of inferring it from who happens to be asking.
+//
 // `recipes` is an unfiltered count: Recipe has no visibility flag, so every recipe is public.
-function publicUserCounts(viewerAuthProviderId?: string): {
-  _count: { select: { recipes: true; collections: { where: Prisma.CollectionWhereInput } } };
-} {
-  return {
-    _count: {
-      select: {
-        recipes: true,
-        collections: { where: collectionCountFilter(viewerAuthProviderId) },
-      },
+const publicUserCounts = {
+  _count: {
+    select: {
+      recipes: true,
+      collections: { where: { isPublic: true } },
     },
-  };
-}
+  },
+} satisfies Prisma.UserInclude;
 
 function formatPublicUser(
   user: User & { _count: { recipes: number; collections: number } },
@@ -107,25 +110,19 @@ function formatPublicUser(
   };
 }
 
-export async function getUserById(
-  id: string,
-  viewerAuthProviderId?: string,
-): Promise<PublicUserWithCounts> {
+export async function getUserById(id: string): Promise<PublicUserWithCounts> {
   const user = await prisma.user.findUnique({
     where: { id },
-    include: publicUserCounts(viewerAuthProviderId),
+    include: publicUserCounts,
   });
   if (!user) throw ApiError.notFound('User');
   return formatPublicUser(user);
 }
 
-export async function getUserByUsername(
-  username: string,
-  viewerAuthProviderId?: string,
-): Promise<PublicUserWithCounts> {
+export async function getUserByUsername(username: string): Promise<PublicUserWithCounts> {
   const user = await prisma.user.findUnique({
     where: { username },
-    include: publicUserCounts(viewerAuthProviderId),
+    include: publicUserCounts,
   });
   if (!user) throw ApiError.notFound('User');
   return formatPublicUser(user);
