@@ -38,7 +38,10 @@ describe('createRecipeSchema — videoUrl', () => {
   });
 
   it('rejects a URL from a disallowed host', () => {
-    const result = createRecipeSchema.safeParse({ ...base, videoUrl: 'https://evil.com/video.mp4' });
+    const result = createRecipeSchema.safeParse({
+      ...base,
+      videoUrl: 'https://evil.com/video.mp4',
+    });
     expect(result.success).toBe(false);
   });
 });

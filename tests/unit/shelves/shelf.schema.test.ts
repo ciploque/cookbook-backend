@@ -42,7 +42,7 @@ describe('queryCriteriaSchema', () => {
     expect(queryCriteriaSchema.safeParse({ minRating: 9 }).success).toBe(false);
   });
 
-  it('strips page/limit — paging is the shelf\'s concern, driven by maxItems', () => {
+  it("strips page/limit — paging is the shelf's concern, driven by maxItems", () => {
     expect(queryCriteriaSchema.parse({ page: 3, limit: 40 })).toEqual({});
   });
 });
@@ -55,9 +55,7 @@ describe('manualCriteriaSchema', () => {
   it('rejects non-uuids, an empty list, and more than 50 ids', () => {
     expect(manualCriteriaSchema.safeParse({ recipeIds: ['nope'] }).success).toBe(false);
     expect(manualCriteriaSchema.safeParse({ recipeIds: [] }).success).toBe(false);
-    expect(
-      manualCriteriaSchema.safeParse({ recipeIds: Array(51).fill(uuid) }).success,
-    ).toBe(false);
+    expect(manualCriteriaSchema.safeParse({ recipeIds: Array(51).fill(uuid) }).success).toBe(false);
   });
 });
 
@@ -108,9 +106,9 @@ describe('shelfDefinitionSchema', () => {
     expect(shelfDefinitionSchema.safeParse({ ...base, title: 'x'.repeat(121) }).success).toBe(
       false,
     );
-    expect(
-      shelfDefinitionSchema.safeParse({ ...base, subtitle: 'x'.repeat(201) }).success,
-    ).toBe(false);
+    expect(shelfDefinitionSchema.safeParse({ ...base, subtitle: 'x'.repeat(201) }).success).toBe(
+      false,
+    );
   });
 
   it('caps maxItems at 50 — the recipe query limit the query resolver runs under', () => {
@@ -142,9 +140,7 @@ describe('shelfDefinitionSchema', () => {
   });
 
   it('allows an open-ended window (only one bound set)', () => {
-    expect(shelfDefinitionSchema.safeParse({ ...base, startsAt: '2026-10-01' }).success).toBe(
-      true,
-    );
+    expect(shelfDefinitionSchema.safeParse({ ...base, startsAt: '2026-10-01' }).success).toBe(true);
     expect(shelfDefinitionSchema.safeParse({ ...base, endsAt: '2026-11-02' }).success).toBe(true);
   });
 });
@@ -161,7 +157,7 @@ describe('shelves.config.ts', () => {
     }
   });
 
-  it('every definition\'s criteria satisfies the schema of its declared source', () => {
+  it("every definition's criteria satisfies the schema of its declared source", () => {
     const criteriaSchemas = {
       query: queryCriteriaSchema,
       manual: manualCriteriaSchema,

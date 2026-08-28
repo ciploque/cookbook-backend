@@ -19,12 +19,12 @@ describe('categoryDefinitionSchema', () => {
   it('rejects an empty name/slug and enforces the length caps', () => {
     expect(categoryDefinitionSchema.safeParse({ name: '', slug: 'x' }).success).toBe(false);
     expect(categoryDefinitionSchema.safeParse({ name: 'X', slug: '' }).success).toBe(false);
-    expect(
-      categoryDefinitionSchema.safeParse({ name: 'x'.repeat(61), slug: 'x' }).success,
-    ).toBe(false);
-    expect(
-      categoryDefinitionSchema.safeParse({ name: 'X', slug: 'x'.repeat(61) }).success,
-    ).toBe(false);
+    expect(categoryDefinitionSchema.safeParse({ name: 'x'.repeat(61), slug: 'x' }).success).toBe(
+      false,
+    );
+    expect(categoryDefinitionSchema.safeParse({ name: 'X', slug: 'x'.repeat(61) }).success).toBe(
+      false,
+    );
   });
 });
 

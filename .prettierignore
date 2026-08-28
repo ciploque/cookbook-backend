@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+
+# Markdown is hand-maintained here. CLAUDE.md in particular is a living reference whose
+# wide tables Prettier re-pads wholesale (~770 changed lines), which would bury every real
+# documentation edit in whitespace noise. Formatting for these is a review concern, not a
+# tooling one.
+*.md

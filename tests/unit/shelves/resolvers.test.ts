@@ -112,11 +112,7 @@ describe('manual resolver', () => {
       { id: uuid(3) },
     ] as never);
 
-    const ids = await resolveShelfItems(
-      'manual',
-      { recipeIds: [uuid(1), uuid(2), uuid(3)] },
-      20,
-    );
+    const ids = await resolveShelfItems('manual', { recipeIds: [uuid(1), uuid(2), uuid(3)] }, 20);
 
     expect(ids).toEqual([uuid(1), uuid(2), uuid(3)]);
   });

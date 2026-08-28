@@ -6,11 +6,11 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d cookbook_dev"]
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d cookbook_dev']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -22,7 +22,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
-      - "5433:5432"
+      - '5433:5432'
 
   meilisearch:
     image: getmeili/meilisearch:v1.11
@@ -30,11 +30,11 @@ services:
       MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:-masterkey}
       MEILI_ENV: development
     ports:
-      - "7700:7700"
+      - '7700:7700'
     volumes:
       - meilisearch_data:/meili_data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      test: ['CMD', 'curl', '-f', 'http://localhost:7700/health']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -49,7 +49,7 @@ services:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/cookbook_dev
       MEILISEARCH_URL: http://meilisearch:7700
     ports:
-      - "${PORT:-3001}:${PORT:-3001}"
+      - '${PORT:-3001}:${PORT:-3001}'
     depends_on:
       postgres:
         condition: service_healthy

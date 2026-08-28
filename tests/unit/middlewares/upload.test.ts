@@ -41,12 +41,10 @@ const api = (): supertest.Agent => supertest(app);
 
 describe('uploadSingleImage()', () => {
   it('buffers the file in memory and exposes it on req.file', async () => {
-    const res = await api()
-      .post('/single')
-      .attach('image', Buffer.from('fake-jpeg-bytes'), {
-        filename: 'photo.jpg',
-        contentType: 'image/jpeg',
-      });
+    const res = await api().post('/single').attach('image', Buffer.from('fake-jpeg-bytes'), {
+      filename: 'photo.jpg',
+      contentType: 'image/jpeg',
+    });
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ fieldname: 'image', content: 'fake-jpeg-bytes' });
@@ -79,12 +77,10 @@ describe('multer failures are translated to ApiError, never a raw 500', () => {
   // The mimetype prefilter is cheap and client-declared; storage.service verifies the real
   // magic bytes later. This test guards the first gate, including the SVG/XSS case.
   it('rejects a non-image mimetype with 422', async () => {
-    const res = await api()
-      .post('/single')
-      .attach('image', Buffer.from('#!/bin/sh\necho pwned'), {
-        filename: 'payload.sh',
-        contentType: 'application/x-sh',
-      });
+    const res = await api().post('/single').attach('image', Buffer.from('#!/bin/sh\necho pwned'), {
+      filename: 'payload.sh',
+      contentType: 'application/x-sh',
+    });
 
     expect(res.status).toBe(422);
     expect(res.body.error.code).toBe('VALIDATION_ERROR');

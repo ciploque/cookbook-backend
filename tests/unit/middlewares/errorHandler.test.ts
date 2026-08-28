@@ -54,7 +54,10 @@ describe('errorHandler()', () => {
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
-        error: expect.objectContaining({ code: 'INTERNAL_ERROR', message: 'Internal server error' }),
+        error: expect.objectContaining({
+          code: 'INTERNAL_ERROR',
+          message: 'Internal server error',
+        }),
       }),
     );
   });

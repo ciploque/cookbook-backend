@@ -328,10 +328,12 @@ describe('createReview()', () => {
 
   it('throws CONFLICT when user has already reviewed the recipe', async () => {
     const { Prisma } = await import('@prisma/client');
-    const p2002 = Object.assign(new Prisma.PrismaClientKnownRequestError('Unique constraint', {
-      code: 'P2002',
-      clientVersion: '5.0.0',
-    }));
+    const p2002 = Object.assign(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+      }),
+    );
 
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipe as never);
@@ -543,7 +545,10 @@ describe('addReviewImages()', () => {
   });
 
   it('rejects when adding would exceed the 10-image cap', async () => {
-    const nearFull = { ...mockReview, imageUrls: Array(9).fill('/reviews/review-uuid/gallery/x.jpg') };
+    const nearFull = {
+      ...mockReview,
+      imageUrls: Array(9).fill('/reviews/review-uuid/gallery/x.jpg'),
+    };
     vi.mocked(prisma.review.findUnique).mockResolvedValue(nearFull as never);
 
     await expect(

@@ -44,7 +44,14 @@ const RECIPE_ID = '01a005f1-abca-7302-8cc6-e9762dea4932';
 const REVIEW_ID = '01a005f1-abca-7302-8cc6-e9762dea4933';
 
 const review = { id: REVIEW_ID, recipeId: RECIPE_ID, rating: 4, content: 'Great', imageUrls: [] };
-const meta = { page: 1, limit: 20, total: 1, totalPages: 1, hasNextPage: false, hasPrevPage: false };
+const meta = {
+  page: 1,
+  limit: 20,
+  total: 1,
+  totalPages: 1,
+  hasNextPage: false,
+  hasPrevPage: false,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
