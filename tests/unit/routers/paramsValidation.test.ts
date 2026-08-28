@@ -23,6 +23,7 @@ vi.mock('../../../src/config/database', () => ({ prisma: {} }));
 vi.mock('../../../src/modules/recipes/recipe.service', () => ({
   getRecipeAuthorId: vi.fn(async () => 'dev-user'),
   getRecipeById: vi.fn(async () => ({ id: 'ok' })),
+  listRecipes: vi.fn(async () => ({ data: [], meta: {} })),
   listRecipesByUser: vi.fn(async () => ({ data: [], meta: {} })),
   getRecipeByUsernameAndSlug: vi.fn(async () => ({ id: 'ok' })),
 }));
@@ -174,6 +175,34 @@ describe('well-formed uuid params still reach the handler', () => {
       .set(...AUTH);
     expect(res.status).not.toBe(422);
     expect(recipeService.getRecipeAuthorId).toHaveBeenCalledWith(UUID);
+  });
+
+  it('GET /recipes forwards undefined when no session is present', async () => {
+    const res = await api().get('/recipes');
+    expect(res.status).toBe(200);
+    expect(recipeService.listRecipes).toHaveBeenCalledWith(expect.anything(), undefined);
+  });
+
+  it('GET /recipes forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get('/recipes')
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(recipeService.listRecipes).toHaveBeenCalledWith(expect.anything(), 'dev-user');
+  });
+
+  it('GET /users/:userId/recipes forwards undefined when no session is present', async () => {
+    const res = await api().get(`/users/${UUID}/recipes`);
+    expect(res.status).toBe(200);
+    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(UUID, expect.anything(), undefined);
+  });
+
+  it('GET /users/:userId/recipes forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get(`/users/${UUID}/recipes`)
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(UUID, expect.anything(), 'dev-user');
   });
 });
 

@@ -64,6 +64,31 @@ async function resolveViewerState(recipeId: string, viewerSub?: string) {
   return { hasReviewed: review !== null, isSavedInCollection: saved !== null };
 }
 
+// Batched counterpart of resolveViewerState's saved-check, for list pages (up to `limit`, capped
+// at 50, items per request) — one findMany instead of N findFirsts. No query at all for an
+// anonymous caller or an empty page. Deliberately does not resolve hasReviewed: list items don't
+// carry it, only the two detail routes do.
+async function attachSavedState<T extends { id: string }>(
+  items: T[],
+  viewerSub?: string,
+): Promise<(T & { isSavedInCollection: boolean })[]> {
+  if (!viewerSub || items.length === 0) {
+    return items.map((item) => ({ ...item, isSavedInCollection: false }));
+  }
+
+  const saved = await prisma.collectionRecipe.findMany({
+    where: {
+      recipeId: { in: items.map((item) => item.id) },
+      collection: { owner: { authProviderId: viewerSub } },
+    },
+    select: { recipeId: true },
+    distinct: ['recipeId'],
+  });
+  const savedIds = new Set(saved.map((s) => s.recipeId));
+
+  return items.map((item) => ({ ...item, isSavedInCollection: savedIds.has(item.id) }));
+}
+
 function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSearchDocument {
   return {
     id: recipe.id,
@@ -123,11 +148,7 @@ export function formatRecipeListItem(
   };
 }
 
-export async function listRecipes(query: RecipeQuery) {
-  if (query.q) {
-    return searchRecipesViaMeili(query);
-  }
-
+async function listRecipesFromPostgres(query: RecipeQuery) {
   const { tags, category, authorId, minRating, page, limit, sortBy, order } = query;
   const skip = toSkip(page, limit);
 
@@ -166,6 +187,19 @@ export async function listRecipes(query: RecipeQuery) {
     data: recipes.map(formatRecipeListItem),
     meta: buildMeta(page, limit, total),
   };
+}
+
+// Both branches funnel through the same attachSavedState helper, so the saved-state logic
+// itself can't drift between the Postgres and Meilisearch paths — only the item shapes differ,
+// which is why this isn't a single shared call site.
+export async function listRecipes(query: RecipeQuery, viewerSub?: string) {
+  if (query.q) {
+    const result = await searchRecipesViaMeili(query);
+    return { data: await attachSavedState(result.data, viewerSub), meta: result.meta };
+  }
+
+  const result = await listRecipesFromPostgres(query);
+  return { data: await attachSavedState(result.data, viewerSub), meta: result.meta };
 }
 
 export async function getRecipeByUsernameAndSlug(
@@ -355,8 +389,8 @@ export async function deleteRecipe(recipeId: string): Promise<void> {
   existing.imageUrls.forEach((key) => void deleteImage(key));
 }
 
-export async function listRecipesByUser(userId: string, query: RecipeQuery) {
-  return listRecipes({ ...query, authorId: userId });
+export async function listRecipesByUser(userId: string, query: RecipeQuery, viewerSub?: string) {
+  return listRecipes({ ...query, authorId: userId }, viewerSub);
 }
 
 export async function uploadCoverImage(recipeId: string, buffer: Buffer) {

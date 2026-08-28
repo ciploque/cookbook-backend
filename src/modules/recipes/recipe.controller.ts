@@ -9,8 +9,14 @@ import {
   UpdateRecipeInput,
 } from './recipe.schema';
 
+// optionalAuthenticate populates req.user only when a valid session is present — an anonymous
+// caller gets `undefined` here, which the service resolves to isSavedInCollection: false for
+// every item with no extra query.
 export async function listRecipes(req: Request, res: Response): Promise<void> {
-  const result = await recipeService.listRecipes(req.query as unknown as RecipeQuery);
+  const result = await recipeService.listRecipes(
+    req.query as unknown as RecipeQuery,
+    req.user?.sub,
+  );
   res.json({ success: true, ...result });
 }
 
@@ -60,6 +66,7 @@ export async function listRecipesByUser(req: Request, res: Response): Promise<vo
   const result = await recipeService.listRecipesByUser(
     req.params.userId as string,
     req.query as unknown as RecipeQuery,
+    req.user?.sub,
   );
   res.json({ success: true, ...result });
 }

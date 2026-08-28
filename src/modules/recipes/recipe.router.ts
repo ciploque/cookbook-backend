@@ -34,7 +34,14 @@ const uploadLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-router.get('/', validate(recipeQuerySchema, 'query'), asyncHandler(controller.listRecipes));
+// Public, but optionalAuthenticate resolves the caller (when there is one) so each list item
+// can carry an accurate isSavedInCollection flag.
+router.get(
+  '/',
+  optionalAuthenticate,
+  validate(recipeQuerySchema, 'query'),
+  asyncHandler(controller.listRecipes),
+);
 // Public, but optionalAuthenticate resolves the caller (when there is one) so the detail
 // response can carry the viewer-scoped hasReviewed / isSavedInCollection flags.
 router.get(
@@ -116,8 +123,11 @@ userRecipesRouter.get(
   optionalAuthenticate,
   asyncHandler(controller.getRecipeByUsernameAndSlug),
 );
+// optionalAuthenticate for the same reason as GET / above — an accurate isSavedInCollection
+// per item when the caller has a session.
 userRecipesRouter.get(
   '/:userId/recipes',
+  optionalAuthenticate,
   validate(userRecipesParamsSchema, 'params'),
   validate(recipeQuerySchema, 'query'),
   asyncHandler(controller.listRecipesByUser),

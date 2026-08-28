@@ -256,6 +256,8 @@ Routes using it:
 | `GET /collections/:collectionId` | A private collection is visible to its owner, `404` for everyone else |
 | `GET /recipes/:recipeId` | Adds the viewer-scoped `hasReviewed` / `isSavedInCollection` flags |
 | `GET /users/:username/recipes/:recipename` | Same flags as above — identical detail shape |
+| `GET /recipes` | Adds an accurate per-item `isSavedInCollection` flag (batched, one query for the whole page) |
+| `GET /users/:userId/recipes` | Same as above — delegates to the same `listRecipes()` |
 
 Do not reach for `req.user?.sub` on a route that hasn't run either `authenticate` or `optionalAuthenticate` — `req.user` is never populated by `clerkMiddleware()` alone, only by one of these two.
 
@@ -435,7 +437,7 @@ other, and both are returned on every user response, public and private alike.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/recipes` | Public | List / search recipes (paginated) |
+| GET | `/recipes` | Public† | List / search recipes (paginated) |
 | GET | `/recipes/:recipeId` | Public* | Get single recipe by DB id (full detail) |
 | POST | `/recipes` | Required | Create recipe |
 | PUT | `/recipes/:recipeId` | Required + Owner | Full update (replaces ingredients, steps, tags atomically) |
@@ -445,10 +447,12 @@ other, and both are returned on every user response, public and private alike.
 | DELETE | `/recipes/:recipeId/cover-image` | Required + Owner | Remove cover image |
 | POST | `/recipes/:recipeId/images` | Required + Owner | Add gallery images (multipart, field `images`, up to 10 files per request) |
 | DELETE | `/recipes/:recipeId/images` | Required + Owner | Remove gallery images by relative path |
-| GET | `/users/:userId/recipes` | Public | List recipes by a specific user (by DB id) |
+| GET | `/users/:userId/recipes` | Public† | List recipes by a specific user (by DB id) |
 | GET | `/users/:username/recipes/:recipename` | Public* | Get recipe by author username + slug (human-friendly URL) |
 
 *The two full-detail GETs run `optionalAuthenticate`, not `authenticate` — anonymous requests are served normally, but a valid session adds the viewer-scoped `hasReviewed` / `isSavedInCollection` fields described in [Recipe Full Detail Shape](#recipe-full-detail-shape). See [Optional Auth](#optional-auth-optionalauthenticate).
+
+†The two list GETs also run `optionalAuthenticate` — anonymous requests are served normally, but a valid session makes each item's `isSavedInCollection` (only; not `hasReviewed`) accurate instead of always `false`, resolved for the whole page in one batched query. See [Recipe List Item Shape](#recipe-list-item-shape-get-recipes) and [Optional Auth](#optional-auth-optionalauthenticate).
 
 > **Route registration order matters:** `GET /users/:username/recipes/:recipename` is registered **before** `GET /users/:userId/recipes` in `userRecipesRouter` (in `recipe.router.ts`) to avoid the more-specific route being shadowed by the param wildcard. Cross-prefix routes live in their owning module's router and are exported as a named router (`userRecipesRouter`, `userCollectionsRouter`, `recipeReviewsRouter`); `app.ts` only mounts routers, it does not define routes.
 
@@ -556,11 +560,16 @@ a *followed* collection doesn't count) describe the requester, not the recipe. T
 booleans, never `null`: an anonymous caller gets `false`/`false`, so the frontend needs no
 null handling.
 
-They're returned **only** by the two full-detail GETs (`GET /recipes/:recipeId` and
-`GET /users/:username/recipes/:recipename`), and are absent from list items, the Meilisearch
-search path, and the `POST`/`PUT`/`PATCH`/image-endpoint responses — the index document is
-shared across all viewers, and the write responses aren't viewer-scoped. In OpenAPI this is
-the separate `RecipeDetailWithViewerState` schema; `RecipeDetail` itself stays viewer-agnostic.
+Both are returned together **only** by the two full-detail GETs (`GET /recipes/:recipeId` and
+`GET /users/:username/recipes/:recipename`); they're absent from the
+`POST`/`PUT`/`PATCH`/image-endpoint responses, since those aren't viewer-scoped. In OpenAPI
+this is the separate `RecipeDetailWithViewerState` schema; `RecipeDetail` itself stays
+viewer-agnostic.
+
+`isSavedInCollection` alone (not `hasReviewed`) is also returned by the two LIST endpoints —
+see [Recipe List Item Shape](#recipe-list-item-shape-get-recipes) below — but is still absent
+from `GET /shelves`/`GET /shelves/:slug`, whose items are a precomputed snapshot with no
+per-viewer context to resolve against.
 
 Both flags are resolved by `resolveViewerState()` in `recipe.service.ts`: two index-backed
 `findFirst`s (`Review.@@index([recipeId])`, `CollectionRecipe.@@index([recipeId])`) run in
@@ -587,9 +596,21 @@ Abbreviated — no full steps or ingredients:
   "averageRating": "number | null",
   "reviewCount": 0,
   "author": { "id": "uuid", "username": "string", "displayName": "string" },
+  "isSavedInCollection": false,
   "createdAt": "ISO8601"
 }
 ```
+
+**`isSavedInCollection`** is the same viewer-scoped flag described above (`true` when the
+recipe is in a collection **owned by** the caller), resolved for the whole page in one batched
+query (`CollectionRecipe.findMany` with `recipeId: { in: [...] }`, scoped by the caller's
+`authProviderId`) rather than one lookup per item — see `attachSavedState()` in
+`recipe.service.ts`. Always a boolean, `false` for an anonymous caller, with **no query issued**
+at all when there's no caller or the page is empty. `GET /recipes` and
+`GET /users/:userId/recipes` both run `optionalAuthenticate` for this reason (previously neither
+ran any auth middleware). `hasReviewed` is deliberately not included here — only the two
+full-detail GETs return it, to keep the list item smaller and avoid an extra `Review` lookup on
+every list request.
 
 #### Recipe Cover & Gallery Images (Cloudflare R2) — Phase 2
 
@@ -1057,6 +1078,13 @@ is ample). There is deliberately no in-process scheduler and no new npm dependen
 `items` uses the exact same shape as `GET /recipes` list items, via the `recipeListSelect` /
 `formatRecipeListItem` pair exported from `recipe.service.ts` — exported precisely so the
 two can't drift. `criteria` is authoring detail and is **not** exposed by the API.
+
+**One deliberate exception:** shelf items do **not** carry `isSavedInCollection`, even though
+`GET /recipes` list items do (see [Recipe List Item Shape](#recipe-list-item-shape-get-recipes)).
+`formatRecipeListItem` itself was left untouched when that field was added — it's resolved one
+layer up, inside `listRecipes()`, from the caller's `req.user?.sub`. Shelf contents are a
+precomputed snapshot resolved by a scheduled refresh job with no per-viewer request context at
+all, so there's no caller to resolve it against.
 
 `GET /shelves/:slug` returns `{ success, shelf, data, meta }` — shelf metadata alongside a
 standard paginated `data`/`meta` pair.

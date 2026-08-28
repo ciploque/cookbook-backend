@@ -90,6 +90,7 @@ describe('GET /recipes', () => {
         sortBy: 'createdAt',
         order: 'desc',
       }),
+      undefined,
     );
   });
 });
@@ -143,6 +144,7 @@ describe('GET /users/:userId/recipes', () => {
     expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(
       UUID,
       expect.objectContaining({ page: 2 }),
+      undefined,
     );
   });
 });

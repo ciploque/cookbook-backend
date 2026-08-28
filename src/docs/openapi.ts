@@ -145,6 +145,15 @@ const RecipeListItemSchema = registry.register(
   }),
 );
 
+// GET /recipes and GET /users/{userId}/recipes only. Plain RecipeListItem stays viewer-agnostic —
+// it's shared by GET /shelves, whose items are a precomputed snapshot with no per-viewer context.
+const RecipeListItemWithViewerStateSchema = registry.register(
+  'RecipeListItemWithViewerState',
+  RecipeListItemSchema.extend({
+    isSavedInCollection: z.boolean(),
+  }),
+);
+
 const PaginationMetaSchema = z.object({
   page: z.number().int(),
   limit: z.number().int(),
@@ -477,7 +486,7 @@ registry.registerPath({
         'application/json': {
           schema: z.object({
             success: z.literal(true),
-            data: z.array(RecipeListItemSchema),
+            data: z.array(RecipeListItemWithViewerStateSchema),
             meta: PaginationMetaSchema,
           }),
         },
@@ -853,7 +862,7 @@ registry.registerPath({
         'application/json': {
           schema: z.object({
             success: z.literal(true),
-            data: z.array(RecipeListItemSchema),
+            data: z.array(RecipeListItemWithViewerStateSchema),
             meta: PaginationMetaSchema,
           }),
         },

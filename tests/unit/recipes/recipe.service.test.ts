@@ -21,6 +21,7 @@ vi.mock('../../../src/config/database', () => ({
     },
     collectionRecipe: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
     recipeCategory: {
       deleteMany: vi.fn(),
@@ -894,6 +895,77 @@ describe('listRecipes()', () => {
     expect(searchRecipesViaMeili).toHaveBeenCalledWith(query);
     expect(prisma.recipe.count).not.toHaveBeenCalled();
   });
+
+  // ─── isSavedInCollection (viewer state) ───────────────────────────────────
+
+  it('sets isSavedInCollection: false for every item and issues no query when anonymous', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(1);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([mockRecipeListItem] as never);
+
+    const result = await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' });
+
+    expect(result.data[0]).toHaveProperty('isSavedInCollection', false);
+    expect(prisma.collectionRecipe.findMany).not.toHaveBeenCalled();
+  });
+
+  it('issues no query when the page has zero items, even with a viewer', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(0);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
+
+    const result = await listRecipes(
+      { page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' },
+      'user_viewer',
+    );
+
+    expect(result.data).toEqual([]);
+    expect(prisma.collectionRecipe.findMany).not.toHaveBeenCalled();
+  });
+
+  it('marks saved items true via one batched query scoped to the viewer', async () => {
+    const otherItem = { ...mockRecipeListItem, id: 'recipe-uuid-2' };
+    vi.mocked(prisma.recipe.count).mockResolvedValue(2);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([mockRecipeListItem, otherItem] as never);
+    vi.mocked(prisma.collectionRecipe.findMany).mockResolvedValue([
+      { recipeId: 'recipe-uuid' },
+    ] as never);
+
+    const result = await listRecipes(
+      { page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' },
+      'user_viewer',
+    );
+
+    expect(result.data.find((r) => r.id === 'recipe-uuid')).toHaveProperty(
+      'isSavedInCollection',
+      true,
+    );
+    expect(result.data.find((r) => r.id === 'recipe-uuid-2')).toHaveProperty(
+      'isSavedInCollection',
+      false,
+    );
+    expect(prisma.collectionRecipe.findMany).toHaveBeenCalledWith({
+      where: {
+        recipeId: { in: ['recipe-uuid', 'recipe-uuid-2'] },
+        collection: { owner: { authProviderId: 'user_viewer' } },
+      },
+      select: { recipeId: true },
+      distinct: ['recipeId'],
+    });
+  });
+
+  it('attaches isSavedInCollection to Meilisearch results too', async () => {
+    const query = { q: 'carbonara', page: 1, limit: 20, sortBy: 'createdAt' as const, order: 'desc' as const };
+    vi.mocked(searchRecipesViaMeili).mockResolvedValue({
+      data: [{ ...mockRecipeListItem, id: 'recipe-uuid' } as never],
+      meta: { page: 1, limit: 20, total: 1, totalPages: 1, hasNextPage: false, hasPrevPage: false },
+    });
+    vi.mocked(prisma.collectionRecipe.findMany).mockResolvedValue([
+      { recipeId: 'recipe-uuid' },
+    ] as never);
+
+    const result = await listRecipes(query, 'user_viewer');
+
+    expect(result.data[0]).toHaveProperty('isSavedInCollection', true);
+  });
 });
 
 // ─── listRecipesByUser ────────────────────────────────────────────────────────
@@ -937,6 +1009,27 @@ describe('listRecipesByUser()', () => {
 
     expect(searchRecipesViaMeili).toHaveBeenCalledWith(
       expect.objectContaining({ q: 'carbonara', category: 'pasta', authorId: 'author-uuid' }),
+    );
+  });
+
+  it('forwards the viewer sub through to listRecipes for isSavedInCollection', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(1);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([mockRecipeListItem] as never);
+    vi.mocked(prisma.collectionRecipe.findMany).mockResolvedValue([
+      { recipeId: 'recipe-uuid' },
+    ] as never);
+
+    const result = await listRecipesByUser(
+      'author-uuid',
+      { page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' },
+      'user_viewer',
+    );
+
+    expect(result.data[0]).toHaveProperty('isSavedInCollection', true);
+    expect(prisma.collectionRecipe.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ collection: { owner: { authProviderId: 'user_viewer' } } }),
+      }),
     );
   });
 });
