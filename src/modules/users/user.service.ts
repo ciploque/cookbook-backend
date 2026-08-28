@@ -55,6 +55,7 @@ export async function updateMe(authProviderId: string, input: UpdateUserInput): 
         ...(input.username !== undefined && { username: input.username }),
         ...(input.displayName !== undefined && { displayName: input.displayName }),
         ...(input.bio !== undefined && { bio: input.bio }),
+        ...(input.about !== undefined && { about: input.about }),
         ...(input.avatarUrl !== undefined && { avatarUrl: input.avatarUrl }),
       },
     });

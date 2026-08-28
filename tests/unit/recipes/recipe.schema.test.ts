@@ -6,17 +6,23 @@ vi.mock('../../../src/config/env', () => ({
 
 import { createRecipeSchema, recipeQuerySchema } from '../../../src/modules/recipes/recipe.schema';
 
-describe('createRecipeSchema — category normalization', () => {
+describe('createRecipeSchema — categories', () => {
   const base = { title: 'Test', tags: [], ingredients: [], steps: [] };
 
-  it('lowercases and trims category on write', () => {
-    const result = createRecipeSchema.parse({ ...base, category: '  Pasta  ' });
-    expect(result.category).toBe('pasta');
+  it('lowercases and trims every category slug on write', () => {
+    const result = createRecipeSchema.parse({ ...base, categories: ['  Pasta  ', 'VEGAN'] });
+    expect(result.categories).toEqual(['pasta', 'vegan']);
   });
 
-  it('leaves an already-lowercase category untouched', () => {
-    const result = createRecipeSchema.parse({ ...base, category: 'outros' });
-    expect(result.category).toBe('outros');
+  it('defaults to an empty array when omitted', () => {
+    expect(createRecipeSchema.parse(base).categories).toEqual([]);
+  });
+
+  it('rejects more than 5 categories and empty slugs', () => {
+    expect(
+      createRecipeSchema.safeParse({ ...base, categories: ['a', 'b', 'c', 'd', 'e', 'f'] }).success,
+    ).toBe(false);
+    expect(createRecipeSchema.safeParse({ ...base, categories: [''] }).success).toBe(false);
   });
 });
 
@@ -57,6 +63,7 @@ describe('createRecipeSchema — authorNote', () => {
 });
 
 describe('recipeQuerySchema — category normalization', () => {
+  // The filter param stays a single slug even though a recipe can now carry several.
   it('lowercases and trims the category filter the same way as write', () => {
     const result = recipeQuerySchema.parse({ category: '  Pasta  ' });
     expect(result.category).toBe('pasta');

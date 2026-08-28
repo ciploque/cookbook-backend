@@ -4,6 +4,7 @@ import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { generateRecipeSlug } from '../../utils/slugify';
 import { upsertTags } from '../tags/tag.service';
+import { resolveCategories } from '../categories/category.service';
 import { deleteImage, storeImage } from '../storage/storage.service';
 import {
   CreateRecipeInput,
@@ -26,11 +27,16 @@ const recipeFullInclude = {
   ingredients: { orderBy: { order: 'asc' as const } },
   steps: { orderBy: { order: 'asc' as const } },
   recipeTags: { include: { tag: true } },
+  recipeCategories: { include: { category: true } },
 } satisfies Prisma.RecipeInclude;
 
 function formatRecipeFull(recipe: Prisma.RecipeGetPayload<{ include: typeof recipeFullInclude }>) {
-  const { recipeTags, ...rest } = recipe;
-  return { ...rest, tags: recipeTags.map((rt) => rt.tag.slug) };
+  const { recipeTags, recipeCategories, ...rest } = recipe;
+  return {
+    ...rest,
+    tags: recipeTags.map((rt) => rt.tag.slug),
+    categories: recipeCategories.map((rc) => rc.category.slug),
+  };
 }
 
 const NO_VIEWER_STATE = { hasReviewed: false, isSavedInCollection: false };
@@ -65,7 +71,7 @@ function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSe
     title: recipe.title,
     description: recipe.description ?? null,
     authorNote: recipe.authorNote ?? null,
-    category: recipe.category ?? null,
+    categories: recipe.categories,
     coverImageUrl: recipe.coverImageUrl,
     imageUrls: recipe.imageUrls,
     videoUrl: recipe.videoUrl,
@@ -92,7 +98,6 @@ export const recipeListSelect = {
   title: true,
   description: true,
   authorNote: true,
-  category: true,
   coverImageUrl: true,
   imageUrls: true,
   videoUrl: true,
@@ -103,16 +108,18 @@ export const recipeListSelect = {
   createdAt: true,
   author: { select: { id: true, username: true, displayName: true } },
   recipeTags: { include: { tag: true } },
+  recipeCategories: { include: { category: true } },
 } satisfies Prisma.RecipeSelect;
 
 export function formatRecipeListItem(
   recipe: Prisma.RecipeGetPayload<{ select: typeof recipeListSelect }>,
 ) {
-  const { recipeTags, description, ...rest } = recipe;
+  const { recipeTags, recipeCategories, description, ...rest } = recipe;
   return {
     ...rest,
     description: (description ?? '').slice(0, 200),
     tags: recipeTags.map((rt) => rt.tag.slug),
+    categories: recipeCategories.map((rc) => rc.category.slug),
   };
 }
 
@@ -132,7 +139,9 @@ export async function listRecipes(query: RecipeQuery) {
     : [];
 
   const where: Prisma.RecipeWhereInput = {
-    ...(category && { category }),
+    // A single slug matched through the join table: the recipe carries that category among
+    // its own. `Category.slug` is unique, so the lookup is index-backed.
+    ...(category && { recipeCategories: { some: { category: { slug: category } } } }),
     ...(authorId && { authorId }),
     ...(minRating !== undefined && { averageRating: { gte: minRating } }),
     ...(tagSlugs.length > 0 && {
@@ -195,6 +204,8 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
 
   const slug = generateRecipeSlug(input.title);
   const tags = await upsertTags(input.tags);
+  // Resolved before the write: an unknown slug throws a 422 here, leaving nothing behind.
+  const categories = await resolveCategories(input.categories);
 
   let recipe;
   try {
@@ -204,7 +215,6 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
         title: input.title,
         description: input.description,
         authorNote: input.authorNote,
-        category: input.category,
         coverImageUrl: null,
         imageUrls: [],
         videoUrl: input.videoUrl,
@@ -220,6 +230,9 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
         },
         recipeTags: {
           create: tags.map((t) => ({ tagId: t.id })),
+        },
+        recipeCategories: {
+          create: categories.map((c) => ({ categoryId: c.id })),
         },
       },
       include: recipeFullInclude,
@@ -238,11 +251,13 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
 
 export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
   const tags = await upsertTags(input.tags);
+  const categories = await resolveCategories(input.categories);
 
   const recipe = await prisma.$transaction(async (tx) => {
     await tx.recipeIngredient.deleteMany({ where: { recipeId } });
     await tx.recipeStep.deleteMany({ where: { recipeId } });
     await tx.recipeTag.deleteMany({ where: { recipeId } });
+    await tx.recipeCategory.deleteMany({ where: { recipeId } });
 
     return tx.recipe.update({
       where: { id: recipeId },
@@ -250,7 +265,6 @@ export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
         title: input.title,
         description: input.description,
         authorNote: input.authorNote,
-        category: input.category,
         videoUrl: input.videoUrl,
         prepTimeMinutes: input.prepTimeMinutes,
         servings: input.servings,
@@ -263,6 +277,9 @@ export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
         },
         recipeTags: {
           create: tags.map((t) => ({ tagId: t.id })),
+        },
+        recipeCategories: {
+          create: categories.map((c) => ({ categoryId: c.id })),
         },
       },
       include: recipeFullInclude,
@@ -279,6 +296,8 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
   if (!existing) throw ApiError.notFound('Recipe');
 
   const tags = input.tags !== undefined ? await upsertTags(input.tags) : undefined;
+  const categories =
+    input.categories !== undefined ? await resolveCategories(input.categories) : undefined;
 
   const recipe = await prisma.$transaction(async (tx) => {
     if (input.ingredients !== undefined) {
@@ -290,6 +309,9 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
     if (tags !== undefined) {
       await tx.recipeTag.deleteMany({ where: { recipeId } });
     }
+    if (categories !== undefined) {
+      await tx.recipeCategory.deleteMany({ where: { recipeId } });
+    }
 
     return tx.recipe.update({
       where: { id: recipeId },
@@ -297,7 +319,6 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
         ...(input.title !== undefined && { title: input.title }),
         ...(input.description !== undefined && { description: input.description }),
         ...(input.authorNote !== undefined && { authorNote: input.authorNote }),
-        ...(input.category !== undefined && { category: input.category }),
         ...(input.videoUrl !== undefined && { videoUrl: input.videoUrl }),
         ...(input.prepTimeMinutes !== undefined && { prepTimeMinutes: input.prepTimeMinutes }),
         ...(input.servings !== undefined && { servings: input.servings }),
@@ -310,6 +331,9 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
         }),
         ...(tags !== undefined && {
           recipeTags: { create: tags.map((t) => ({ tagId: t.id })) },
+        }),
+        ...(categories !== undefined && {
+          recipeCategories: { create: categories.map((c) => ({ categoryId: c.id })) },
         }),
       },
       include: recipeFullInclude,

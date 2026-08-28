@@ -37,6 +37,7 @@ const mockUser = {
   username: 'joao',
   displayName: 'João',
   bio: null,
+  about: null,
   avatarUrl: null,
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
@@ -185,7 +186,24 @@ describe('updateMe()', () => {
     const callArgs = vi.mocked(prisma.user.update).mock.calls[0][0];
     expect(callArgs.data).not.toHaveProperty('displayName');
     expect(callArgs.data).not.toHaveProperty('avatarUrl');
+    expect(callArgs.data).not.toHaveProperty('about');
     expect(callArgs.data).toHaveProperty('bio', 'New bio');
+  });
+
+  // `about` is the long-form profile body; `bio` stays the short one. They're independent
+  // fields, so updating one must not touch the other.
+  it('updates about independently of bio', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
+    const about = 'A much longer story about how I started cooking.';
+    vi.mocked(prisma.user.update).mockResolvedValue({ ...mockUser, about });
+
+    const result = await updateMe('user_abc', { about });
+
+    expect(result.about).toBe(about);
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { authProviderId: 'user_abc' },
+      data: { about },
+    });
   });
 
   it('throws CONFLICT (409) when new username is already taken', async () => {

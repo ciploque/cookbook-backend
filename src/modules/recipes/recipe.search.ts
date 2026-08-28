@@ -8,7 +8,7 @@ export interface RecipeSearchDocument {
   title: string;
   description: string | null;
   authorNote: string | null;
-  category: string | null;
+  categories: string[];
   coverImageUrl: string | null;
   imageUrls: string[];
   videoUrl: string | null;
@@ -72,7 +72,9 @@ export async function searchRecipesViaMeili(query: RecipeQuery) {
     : [];
 
   const filter: string[] = [];
-  if (category) filter.push(`category = "${escapeMeiliString(category)}"`);
+  // Array-contains, exactly like the tag clauses below — `categories` is a string[] in the
+  // index document now, so `=` matches a recipe carrying that slug among its own.
+  if (category) filter.push(`categories = "${escapeMeiliString(category)}"`);
   if (authorId) filter.push(`authorId = "${escapeMeiliString(authorId)}"`);
   if (minRating !== undefined) filter.push(`averageRating >= ${minRating}`);
   tagSlugs.forEach((slug) => filter.push(`tags = "${escapeMeiliString(slug)}"`));

@@ -201,9 +201,11 @@ describe('trending resolver', () => {
     );
 
     const args = vi.mocked(prisma.review.groupBy).mock.calls[0]![0]! as {
-      where: { recipe: { category: string; AND: unknown[] } };
+      where: { recipe: { recipeCategories: unknown; AND: unknown[] } };
     };
-    expect(args.where.recipe.category).toBe('dessert');
+    expect(args.where.recipe.recipeCategories).toEqual({
+      some: { category: { slug: 'dessert' } },
+    });
     expect(args.where.recipe.AND).toEqual([
       { recipeTags: { some: { tag: { slug: 'vegan' } } } },
       { recipeTags: { some: { tag: { slug: 'quick' } } } },

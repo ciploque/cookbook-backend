@@ -96,6 +96,12 @@ cookbook-backend/
 │   │   │       ├── query.resolver.ts    # delegates to recipe.service#listRecipes (incl. Meilisearch)
 │   │   │       ├── manual.resolver.ts   # hand-pinned ordered recipe ids
 │   │   │       └── trending.resolver.ts # review counts in a time window
+│   │   ├── categories/
+│   │   │   ├── category.router.ts     # GET /categories — the only route; no write endpoints
+│   │   │   ├── category.controller.ts
+│   │   │   ├── category.service.ts    # listCategories (with counts) + resolveCategories (write-path gate) + syncCategoriesFromConfig
+│   │   │   ├── category.schema.ts     # categoryDefinitionSchema — validates the config file, not requests
+│   │   │   └── categories.config.ts   # THE REGISTRY — checked-in curated category list, source of truth
 │   │   ├── ingredients/
 │   │   │   └── ingredient.service.ts  # Placeholder — normalization is Phase 2 scope
 │   │   ├── tags/
@@ -122,6 +128,7 @@ cookbook-backend/
 │   ├── schema.prisma
 │   ├── migrations/
 │   ├── reindexMeilisearch.ts  # One-shot bulk reindex script: reads all recipes from DB, pushes to Meili
+│   ├── syncCategories.ts      # Applies categories.config.ts to the DB (upsert-only, never deletes)
 │   ├── syncShelves.ts         # Applies shelves.config.ts to the DB, then refreshes contents
 │   └── refreshShelves.ts      # Re-resolves shelf criteria into shelf_items (all shelves, or one by slug)
 ├── tests/
@@ -142,6 +149,9 @@ cookbook-backend/
 │   │   ├── reports/
 │   │   │   ├── report.service.test.ts
 │   │   │   └── report.schema.test.ts
+│   │   ├── categories/
+│   │   │   ├── category.service.test.ts
+│   │   │   └── category.schema.test.ts
 │   │   ├── shelves/
 │   │   │   ├── shelf.service.test.ts
 │   │   │   ├── shelf.schema.test.ts
@@ -314,7 +324,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 | Limiter | Max | Applied to |
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), `${base}/v1/categories` (read-only router — the curated registry), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -388,6 +398,7 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
   "username": "string (3–30 chars, ^[a-z0-9_-]+$)",
   "displayName": "string (max 80)",
   "bio": "string (max 500)",
+  "about": "string (max 5000 — long-form profile body; see the note below)",
   "avatarUrl": "string (https url)"
 }
 ```
@@ -403,6 +414,7 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
   "username": "string",
   "displayName": "string",
   "bio": "string | null",
+  "about": "string | null",
   "avatarUrl": "string | null",
   "createdAt": "2024-01-01T00:00:00.000Z",
   "updatedAt": "2024-01-01T00:00:00.000Z"
@@ -410,6 +422,12 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 ```
 
 **Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses.
+
+**`bio` vs `about`:** two independent optional fields, both update-only (neither is accepted by
+`POST /users/me` — provisioning takes `username`/`displayName`/`avatarUrl`, and the rest is
+filled in later via `PUT /users/me`). `bio` is the short one-liner shown next to an avatar
+(max 500); `about` is the long-form profile body (max 5000). Updating one never touches the
+other, and both are returned on every user response, public and private alike.
 
 ---
 
@@ -440,7 +458,7 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 |---|---|---|
 | `q` | string | Full-text search via Meilisearch (typo-tolerant, relevance-ranked); filters still apply |
 | `tags` | string | Comma-separated tag slugs (max 500 chars, max 20 tags); recipes must match ALL tags |
-| `category` | string | Filter by category string (max 100 chars). Lowercased/trimmed before matching — see Schema decisions |
+| `category` | string | Filter by a single category **slug** (max 100 chars, lowercased/trimmed). A recipe matches if that slug is among its categories — see [Categories](#categories) |
 | `authorId` | string (uuid) | Filter by author DB id |
 | `minRating` | number | Minimum `averageRating` (1–5); recipes with no reviews are excluded |
 | `page` | number | Default `1` |
@@ -467,7 +485,7 @@ Same response shape as `GET /recipes/:recipeId`, viewer-scoped fields included �
   "title": "string (required, max 120)",
   "description": "string (optional, max 2000)",
   "authorNote": "string (optional, max 300 — brief personal note from the author)",
-  "category": "string (optional)",
+  "categories": ["string (category slug, max 5 items — must exist in the registry, else 422)"],
   "tags": ["string (max 20 items)"],
   "videoUrl": "string (optional — https URL from YouTube, Vimeo, TikTok, Instagram, Facebook, or Loom)",
   "prepTimeMinutes": "number (optional, min 0)",
@@ -491,7 +509,8 @@ Same response shape as `GET /recipes/:recipeId`, viewer-scoped fields included �
 }
 ```
 
-`ingredients` is capped at 200 items, `steps` at 100 items (`422 VALIDATION_ERROR` beyond that).
+`ingredients` is capped at 200 items, `steps` at 100 items, `categories` at 5 (`422 VALIDATION_ERROR` beyond that).
+`categories` holds **slugs from the curated registry** — an unknown one is a `422` (unlike `tags`, which are created on the fly). Resolved before the write opens, so a bad slug never leaves a partial recipe. `PUT` replaces the set; `PATCH` leaves it untouched unless the key is present, and `"categories": []` clears it.
 Ingredients are stored in the order they appear in the array (`order` is auto-assigned from array index).
 Steps must have unique `order` values per recipe.
 Slug is generated at creation from the title (no random suffix) and is **immutable**. It's unique **per author**, not globally (`@@unique([authorId, slug])`) — creating two recipes with the same title as the same author returns `409 CONFLICT` (caught from the underlying Prisma `P2002` in `createRecipe`).
@@ -507,7 +526,7 @@ Slug is generated at creation from the title (no random suffix) and is **immutab
   "title": "string",
   "description": "string | null",
   "authorNote": "string | null",
-  "category": "string | null",
+  "categories": ["desserts"],
   "tags": ["pasta", "italian"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
@@ -558,7 +577,7 @@ Abbreviated — no full steps or ingredients:
   "title": "string",
   "description": "string (truncated to 200 chars)",
   "authorNote": "string | null",
-  "category": "string | null",
+  "categories": ["string"],
   "tags": ["string"],
   "coverImageUrl": "string | null",
   "imageUrls": ["string"],
@@ -590,6 +609,66 @@ Max file size: 5MB. Allowed types: JPEG, PNG, WEBP, GIF (verified by content, no
 **No full URLs:** `coverImageUrl`/`imageUrls` in every recipe API response are relative paths with a leading `/` (e.g. `/recipes/<id>/cover/<uuid>.jpg`), never a full `https://` URL. The frontend prepends its own base/CDN URL. `DELETE /recipes/:recipeId/images` expects `paths` to be the exact leading-slash values as returned in `imageUrls`.
 
 `RecipeStep.imageUrl` (per-step images) is unchanged — still a raw URL field, not part of this pipeline, but now validated against `TRUSTED_IMAGE_DOMAINS` via `trustedImageUrlSchema` (see [Environment Variables](#environment-variables)). `User.avatarUrl` uses the same schema — `avatarUrl` is no longer a bare `z.string().url()`, since that only checks the string parses as a URL and does not restrict the scheme (`javascript:`/`data:` URIs pass it). `trustedImageUrlSchema` always requires `https:` (unconditionally, independent of whether `TRUSTED_IMAGE_DOMAINS` is configured) on top of the optional domain allowlist. `provisionFromWebhook` (`user.service.ts`) validates Clerk's `image_url` the same way before writing it, since that path bypasses the Zod schema. `Review.imageUrls` no longer accepts raw URLs at all — it now follows this R2 upload pipeline instead, same as recipe images (see [Review Images (Cloudflare R2)](#review-images-cloudflare-r2)).
+
+---
+
+### Categories
+
+A recipe's categories are a **curated** normalized set: `Category` + the `RecipeCategory` join
+table, structurally identical to `Tag` / `RecipeTag` but with the opposite authoring rule.
+Tags are created on the fly by whatever a user types; categories are not — they come from a
+checked-in registry, and a recipe write naming an unknown slug is a `422`. That's what keeps
+the list free of near-duplicates ("dessert"/"desserts"/"deserts") and makes the counts below
+mean something.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/categories` | Public | Every category with its recipe count |
+
+There are deliberately **no write endpoints** — same reasoning as [Shelves](#shelves): the
+codebase has no admin/role concept, and a config file gives code review and git history for
+free. The registry is `src/modules/categories/categories.config.ts`, applied with
+`npm run categories:sync`.
+
+#### GET /categories
+
+Unpaginated by design: the registry is small (tens of rows) and the caller is a category nav
+that wants all of it in one request. Ordered by `name` ascending. Categories with zero recipes
+are **included** — a curated category nobody has used yet is still a real nav entry (this is
+the opposite of the shelves rule, where an empty row is omitted because it would render as an
+empty carousel).
+
+```json
+{ "success": true, "data": [ { "id": "uuid", "name": "Desserts", "slug": "desserts", "recipeCount": 42 } ] }
+```
+
+#### Sync
+
+```bash
+npm run categories:sync
+```
+
+Validates every definition **before** writing anything (so a typo can't half-apply), then
+upserts by slug — `name` is updated, `slug` is the identity key.
+
+Unlike `shelves:sync`, this **never deletes**. A category absent from the config is reported
+as a warning and left alone: `RecipeCategory` cascades on delete, so removing a category would
+silently unlabel every recipe using it. Dropping one is a deliberate manual act.
+
+Treat a shipped `slug` as immutable — it's what recipes reference and what `?category=`
+filters on. `name` is just the display label and can be edited freely.
+
+#### Where categories appear
+
+| Surface | Shape |
+|---|---|
+| `POST`/`PUT`/`PATCH /recipes` body | `categories: string[]` — slugs, max 5, must exist |
+| Every recipe response (detail + list + search) | `categories: string[]` |
+| `GET /recipes?category=<slug>` | A single slug; matches if it's among the recipe's categories |
+| Meilisearch | `categories` is a searchable + filterable array attribute, same as `tags` |
+
+**Errors:** `422 VALIDATION_ERROR` — details `{ "categories": ["Unknown category: <slug>"] }`,
+listing every unknown slug in the request.
 
 ---
 
@@ -1025,7 +1104,8 @@ model User {
   authProviderId  String   @unique           // Clerk userId (sub claim) — stable external key; NOT a uuid (Clerk's own id format), stays text
   username    String   @unique           // URL-safe handle: ^[a-z0-9_-]+$, 3–30 chars
   displayName String
-  bio         String?
+  bio         String?                     // short one-liner shown next to an avatar (max 500, Zod)
+  about       String?                     // long-form profile body (max 5000, Zod) — see the bio-vs-about note
   avatarUrl   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1042,7 +1122,6 @@ model Recipe {
   title           String
   description     String?
   authorNote      String?
-  category        String?
   coverImageUrl   String?
   imageUrls       String[]
   videoUrl        String?               // https URL, validated against a fixed video-platform allowlist — see Schema decisions
@@ -1056,16 +1135,16 @@ model Recipe {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  author      User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  ingredients RecipeIngredient[]
-  steps       RecipeStep[]
-  recipeTags  RecipeTag[]
-  reviews     Review[]
-  reports     Report[]
+  author           User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  ingredients      RecipeIngredient[]
+  steps            RecipeStep[]
+  recipeTags       RecipeTag[]
+  recipeCategories RecipeCategory[]   // categories are normalized + curated — see Schema decisions
+  reviews          Review[]
+  reports          Report[]
 
   @@unique([authorId, slug])            // slug is unique per author, not globally
   @@index([authorId])
-  @@index([category])
   @@index([averageRating])
   @@map("recipes")
 }
@@ -1121,6 +1200,30 @@ model RecipeTag {
   @@id([recipeId, tagId])
   @@index([tagId])                      // reverse lookup ("recipes with tag X") — the composite PK alone only covers recipeId
   @@map("recipe_tags")
+}
+
+// Structurally identical to Tag/RecipeTag, but *curated*: rows come from the checked-in
+// registry via `npm run categories:sync`, never from a recipe write. See Schema decisions.
+model Category {
+  id   String @id @default(uuid(7)) @db.Uuid
+  name String @unique
+  slug String @unique                    // what recipes reference and `?category=` filters on — treat as immutable
+
+  recipeCategories RecipeCategory[]
+
+  @@map("categories")
+}
+
+model RecipeCategory {
+  recipeId   String @db.Uuid
+  categoryId String @db.Uuid
+
+  recipe   Recipe   @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([recipeId, categoryId])
+  @@index([categoryId])                 // reverse lookup ("recipes in category X") — the composite PK alone only covers recipeId
+  @@map("recipe_categories")
 }
 
 model Review {
@@ -1260,7 +1363,12 @@ model ShelfItem {
 - `Recipe.videoUrl` is a raw, client-supplied `String?` (unlike `coverImageUrl`/`imageUrls`, which are server-managed paths) validated by `trustedVideoUrlSchema` (`src/utils/videoUrl.ts`) against a **fixed, hard-coded** allowlist of video-platform hostnames (YouTube, Vimeo, TikTok, Instagram, Facebook, Loom) — unlike `trustedImageUrlSchema`/`TRUSTED_IMAGE_DOMAINS`, this allowlist is not env-configurable and has no "allow all when unset" fallback; it's always enforced. Validation requires `https:` protocol explicitly and matches `URL.hostname` (WHATWG parser, not regex) by exact-or-subdomain equality, which closes the usual URL-allowlist bypasses (userinfo tricks like `https://youtube.com@evil.com/`, lookalike hosts like `evilyoutube.com`, suffix tricks like `youtube.com.evil.com`). Cloudflare R2 as a video origin is planned but **not yet implemented** — it needs a public R2 domain that doesn't exist in this deployment yet; adding it later means appending to `ALLOWED_VIDEO_HOSTS` (or introducing an env-driven R2 domain list), not restructuring the validator.
 - `RecipeIngredient.name` is a plain string (no normalized `Ingredient` table). Phase 2 scope.
 - `RecipeIngredient.quantity` is `Float?` — a numeric value (the unit string handles "g", "cups", etc.). Optional; omit when quantity is not applicable.
-- `Recipe.category` is `String?` — optional. A `Category` model can be added in Phase 2. Both `createRecipeSchema.category` and `recipeQuerySchema.category` lowercase/trim the value at the Zod layer (`.trim().toLowerCase()`), so `listRecipes` can filter with a plain equality match against `@@index([category])`. Prisma's `mode: 'insensitive'` was deliberately avoided here — it compiles to a case-insensitive comparison (`ILIKE`/`LOWER()`-equivalent) that a plain B-tree index can't satisfy, forcing a sequential scan as the table grows. If you ever add a raw SQL path that writes `category` directly (bypassing the schema), normalize it the same way.
+- **Categories are normalized and curated** (`Category` + `RecipeCategory`), replacing the former `Recipe.category String?` column and its `@@index([category])`. Two decisions worth keeping straight:
+  - *Normalized, many-to-many.* A recipe carries up to 5 category slugs; `GET /recipes?category=<slug>` matches through the join table (`recipeCategories: { some: { category: { slug } } }`), scoped by the unique — therefore indexed — `Category.slug`. The old string column couldn't answer "every category and how many recipes each has" without a `GROUP BY` over the whole recipes table, which is exactly what `GET /categories` needs; nor could it stop two spellings of the same category from coexisting.
+  - *Curated, unlike tags.* Same shape as `Tag`/`RecipeTag`, opposite authoring rule: `upsertTags` creates unseen tags on the fly, while `resolveCategories` only ever **reads** and throws `422` on an unknown slug. The registry is `categories.config.ts`, applied by `npm run categories:sync` — a code change with git history, not an admin action, following the same reasoning as `shelves.config.ts`. Category resolution happens *before* the recipe transaction opens, so a bad slug can't leave a half-written recipe.
+  - *Sync never deletes.* `shelves:sync` deletes rows absent from its config safely — a shelf owns nothing. A `Category` is referenced by `RecipeCategory` rows that cascade, so deleting one would silently unlabel every recipe using it. `syncCategoriesFromConfig` upserts and reports extras instead.
+  - The lowercase-at-the-Zod-layer normalization survives the migration (`createRecipeSchema.categories` and `recipeQuerySchema.category` both `.trim().toLowerCase()`), now so the value matches `Category.slug` directly. Prisma's `mode: 'insensitive'` is still deliberately avoided: it compiles to an `ILIKE`/`LOWER()`-equivalent comparison a plain B-tree index can't satisfy.
+- `User.bio` and `User.about` are two independent optional fields, not one field with a length dial: `bio` is the short one-liner rendered next to an avatar (max 500), `about` is the long-form profile body (max 5000). Both are update-only — `provisionUserSchema` deliberately accepts neither, since first-login provisioning has nothing to put in them. Caps are Zod-enforced only; both are plain `String?` in Postgres, consistent with every other free-text field here.
 - Full-text search uses Meilisearch (not `ILIKE`). Postgres is the source of truth; Meilisearch is a read index only.
 - `Recipe.reviewCount`/`ratingSum`/`averageRating` are **denormalized** rather than computed live (`AVG(rating)` / Prisma `_count`) at request time. Reason: `listRecipes` has two response paths — Postgres (`q` absent) and Meilisearch (`q` present, returns raw index-document hits with no second DB round-trip) — and a live aggregate can only cover the first path, producing an inconsistent field between browsing and searching. Every review write path updates these stats inside the same transaction as the review write itself, and then pushes the result to Meilisearch via `updateIndexedRecipeRating`. `createReview` uses a single atomic increment-and-recompute (`UPDATE ... RETURNING`), since an insert's effect on the aggregate is known without reading the table. `updateReview` and `deleteReview` can't be expressed as an increment (a rating *change* isn't a delta of one), so they share `recomputeRecipeRatingStats(recipeId)` in `review.service.ts` — one `UPDATE recipes ... FROM (SELECT count(*), sum(rating) FROM reviews WHERE "recipeId" = $1) ... RETURNING` that recomputes all three columns **from the `Review` table**, and sets `averageRating` back to `NULL` when the last review is removed. Recomputing from source also self-heals any drift as a side effect. Ordering matters: `$transaction([...])` runs its array in order, so the review write is placed first and the aggregate sees the new state. Any future review write path must do the same. `averageRating` is stored (not derived at read time from `ratingSum`/`reviewCount`) so it can be indexed, sorted (`sortBy=averageRating`), and filtered (`minRating`) directly in both Postgres and Meilisearch — the latter requires the value to already be present in the synced document.
 - `Review.imageUrls` is populated only via `POST`/`DELETE /reviews/:reviewId/images` (Cloudflare R2) — not accepted in the `POST /reviews` body — same pattern as `Recipe.coverImageUrl`/`imageUrls`. See [Review Images (Cloudflare R2)](#review-images-cloudflare-r2).
@@ -1387,7 +1495,7 @@ q absent   →  Prisma findMany()        →  PostgreSQL
 
 Both paths support `tags`, `category`, `authorId` filters and `sortBy`/`order`. The response shape is identical.
 
-**Filter string escaping:** `category` and each tag slug are user-controlled strings interpolated directly into Meilisearch's filter DSL (`category = "<value>"`). `searchRecipesViaMeili` escapes `\` and `"` via `escapeMeiliString()` before interpolating, to prevent breaking out of the filter expression. `authorId` is already UUID-validated by Zod so it can't contain `"`, but it's escaped too for consistency.
+**Filter string escaping:** `category` and each tag slug are user-controlled strings interpolated directly into Meilisearch's filter DSL (`categories = "<value>"` — an array-contains match, since the indexed document holds `categories: string[]`). `searchRecipesViaMeili` escapes `\` and `"` via `escapeMeiliString()` before interpolating, to prevent breaking out of the filter expression. `authorId` is already UUID-validated by Zod so it can't contain `"`, but it's escaped too for consistency.
 
 **Pagination:** `searchRecipesViaMeili` uses Meilisearch's page-based pagination (`page`/`hitsPerPage`), not `offset`/`limit` — the latter only ever returns an approximate `estimatedTotalHits`, while page-based mode returns an exact `totalHits`, which `buildMeta` needs for correct `totalPages`/`hasNextPage`.
 
@@ -1397,8 +1505,8 @@ Called once at server startup (non-blocking, errors are logged):
 
 | Attribute type | Fields |
 |---|---|
-| Searchable | `title`, `description`, `category`, `tags` |
-| Filterable | `category`, `authorId`, `tags` |
+| Searchable | `title`, `description`, `categories`, `tags` |
+| Filterable | `categories`, `authorId`, `tags`, `averageRating` |
 | Sortable | `createdAt`, `updatedAt`, `title` |
 
 ### Sync strategy (`src/modules/recipes/recipe.search.ts`)
@@ -1419,7 +1527,7 @@ The indexed document (`RecipeSearchDocument`) matches the list item shape — no
 npm run meili:reindex   # bulk-upserts all recipes from Postgres into Meilisearch
 ```
 
-Run this after first deploy or any direct database import. The script (`prisma/reindexMeilisearch.ts`) reads all recipes with their tags and author via Prisma and enqueues them as a single batch.
+Run this after first deploy or any direct database import — **and after the categories migration**, since the indexed document's `category: string | null` became `categories: string[]`; documents indexed before it still carry the old field and won't match a category filter. The script (`prisma/reindexMeilisearch.ts`) reads all recipes with their tags and author via Prisma and enqueues them as a single batch.
 
 ### Docker
 
@@ -1481,7 +1589,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (488 passing)
+### Unit Tests (508 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1490,13 +1598,15 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/ApiError.test.ts` | 12 | All static factory methods, prototype chain, code/statusCode mapping, multi-word (2 and 3+) resource names in `notFound()` |
 | `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
-| `tests/unit/users/user.service.test.ts` | 28 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe, getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 47 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` plain-equality filter, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
-| `tests/unit/recipes/recipe.schema.test.ts` | 5 | `category` lowercased/trimmed on both write (`createRecipeSchema`) and filter (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs |
-| `tests/unit/recipes/recipe.search.test.ts` | 11 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping (page/hitsPerPage, exact `totalHits`), `minRating` filter clause, filter string escaping for `category`/tag slugs, `updateIndexedRecipeRating` partial document sync |
+| `tests/unit/users/user.service.test.ts` | 30 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
+| `tests/unit/recipes/recipe.service.test.ts` | 65 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
+| `tests/unit/recipes/recipe.schema.test.ts` | 11 | `categories` lowercased/trimmed per slug on write, defaults to `[]`, capped at 5, rejects empty slugs; `category` filter still lowercased/trimmed (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs; `videoUrl` host allowlist; `authorNote` cap |
+| `tests/unit/recipes/recipe.search.test.ts` | 18 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping (page/hitsPerPage, exact `totalHits`), `minRating` filter clause, filter string escaping for the `categories`/tag slug clauses, `updateIndexedRecipeRating` partial document sync |
+| `tests/unit/categories/category.service.test.ts` | 9 | `listCategories` (flattens `_count` into `recipeCount`, keeps zero-count categories, orders by name, empty registry); `resolveCategories` (empty input short-circuits with no query, de-duplicates into one `findMany`, unknown slugs → 422 naming every one of them); `syncCategoriesFromConfig` (created vs updated counts, reports extras **without deleting**, rejects a malformed definition / duplicate slug / duplicate name before any write) |
+| `tests/unit/categories/category.schema.test.ts` | 6 | `categoryDefinitionSchema` — URL-safe slug regex, empty/oversized name and slug. Plus the checked-in `categories.config.ts` itself: every definition valid, unique slugs and names, and the `drinks` slug the `top-drinks` shelf depends on is present |
 | `tests/unit/storage/storage.service.test.ts` | 6 | `storeImage` (returns leading-slash path, uploads to R2 with the unprefixed key, invalid content rejected via `ApiError.validation`), `deleteImage` (strips leading slash before the R2 call), `buildImageUrl` |
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
-| `tests/unit/utils/imageUrl.test.ts` | 4 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
+| `tests/unit/utils/imageUrl.test.ts` | 8 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
 | `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
 | `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
@@ -1505,8 +1615,8 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
 | `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
 | `tests/unit/shelves/shelf.service.test.ts` | 17 | listActiveShelves (active + publish-window predicate, position/item ordering, empty shelves omitted, `criteria` never leaked, list items formatted by the shared recipe mapper), getShelfBySlug (pagination + meta, 404 unknown slug, 404 out-of-window via the same predicate), refreshShelf (atomic delete+insert+`refreshedAt` in one `$transaction`, order follows resolver output, resolver called with source/criteria/maxItems, 404), refreshAllShelves (one failing shelf doesn't abort the batch; single-slug mode skips the findMany), syncShelvesFromConfig (created vs updated counts, deletes shelves absent from config, rejects malformed definition/bad criteria/duplicate slug **before** any write) |
-| `tests/unit/shelves/resolvers.test.ts` | 14 | Registry (every known source resolves; unknown source throws naming the known ones; criteria validated per source). `query` — delegates to `listRecipes` with `maxItems` as limit, applies recipe-query defaults, passes `q` through so the shelf routes to Meilisearch. `manual` — preserves authored order against arbitrary DB order, drops ids whose recipe no longer exists, truncates to `maxItems`. `trending` — window computed from `windowDays` (default 7), `GROUP BY recipeId` ordered by count desc, no recipe filter when none given, AND-s multiple tags + category matching `listRecipes` semantics |
-| `tests/unit/shelves/shelf.schema.test.ts` | 21 | Per-source criteria schemas (query: inherits category lowercasing, empty object valid, strips page/limit, rejects bad sort/rating; manual: uuid/min/max bounds; trending: window default and 1–90 int range). `shelfQuerySchema` defaults + bounds. `shelfDefinitionSchema` — defaults, URL-safe slug regex, title/subtitle caps, `maxItems` ≤ 50, unknown source rejected, ISO date strings coerced to `Date`, `endsAt > startsAt`, open-ended windows allowed. Plus the checked-in `shelves.config.ts` itself: every definition structurally valid, every `criteria` valid for its declared source, unique slugs and positions, no unknown sources |
+| `tests/unit/shelves/resolvers.test.ts` | 13 | Registry (every known source resolves; unknown source throws naming the known ones; criteria validated per source). `query` — delegates to `listRecipes` with `maxItems` as limit, applies recipe-query defaults, passes `q` through so the shelf routes to Meilisearch. `manual` — preserves authored order against arbitrary DB order, drops ids whose recipe no longer exists, truncates to `maxItems`. `trending` — window computed from `windowDays` (default 7), `GROUP BY recipeId` ordered by count desc, no recipe filter when none given, AND-s multiple tags + category matching `listRecipes` semantics |
+| `tests/unit/shelves/shelf.schema.test.ts` | 22 | Per-source criteria schemas (query: inherits category lowercasing, empty object valid, strips page/limit, rejects bad sort/rating; manual: uuid/min/max bounds; trending: window default and 1–90 int range). `shelfQuerySchema` defaults + bounds. `shelfDefinitionSchema` — defaults, URL-safe slug regex, title/subtitle caps, `maxItems` ≤ 50, unknown source rejected, ISO date strings coerced to `Date`, `endsAt > startsAt`, open-ended windows allowed. Plus the checked-in `shelves.config.ts` itself: every definition structurally valid, every `criteria` valid for its declared source, unique slugs and positions, no unknown sources |
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
 | `tests/unit/middlewares/validate.test.ts` | 5 | Valid input passes + unknown keys stripped; schema failure → 422; NUL byte (`0x00`) rejected → 422 at top level, nested in arrays/objects, and in query params |
@@ -1518,7 +1628,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 
 **Mock conventions for unit tests:**
 - Mock `../../../src/config/database` to mock Prisma. The recipe service mock needs `review.findFirst` and `collectionRecipe.findFirst` in addition to the `recipe`/`user` delegates — `resolveViewerState` reads those two tables directly (via relations declared on `Recipe`, not a cross-module import)
-- Mock `../../../src/modules/tags/tag.service` to isolate tag upsert
+- Mock `../../../src/modules/tags/tag.service` to isolate tag upsert, and `../../../src/modules/categories/category.service` to isolate category resolution. Re-establish `resolveCategories`'s default (`mockResolvedValue([])`) in `beforeEach`: every recipe write path awaits it, and `vi.clearAllMocks()` does not restore an implementation a previous test made throw
 - Mock `../../../src/utils/slugify` to control slug output
 - Mock `../../../src/modules/recipes/recipe.search` in recipe service tests — prevents the Meilisearch import chain from triggering `env.ts` validation
 - Shelf tests: mock `../../../src/config/env` (as `{ trustedImageDomains: [] }`) — `shelf.schema.ts` derives from `recipeQuerySchema`, whose import chain reaches `env.ts` and would `process.exit(1)`. Mock `../../../src/modules/shelves/resolvers` in the service test and `../../../src/modules/recipes/recipe.service` in the resolver test, so each layer is tested against a stub of the other
@@ -1570,6 +1680,7 @@ Both run via `docker/docker-compose.yml`.
 | `npm run db:seed` | Seed development database |
 | `npm run db:studio` | Open Prisma Studio |
 | `npm run meili:reindex` | Bulk-index all recipes from Postgres into Meilisearch |
+| `npm run categories:sync` | Apply `categories.config.ts` to the DB (validates, then upserts by slug). Never deletes — categories absent from the config are reported only |
 | `npm run shelves:sync` | Apply `shelves.config.ts` to the DB (validates, upserts, deletes removed rows), then refresh contents |
 | `npm run shelves:refresh [-- <slug>]` | Re-resolve shelf criteria into `shelf_items`. Run on a schedule (cron, every ~15 min) to bound staleness |
 | `npm run clerk:token -- <userId>` | Mint a real Clerk session token for local API testing (no frontend needed) |
@@ -1692,3 +1803,18 @@ Both run via `docker/docker-compose.yml`.
 - [ ] Scheduled refresh — the cron/platform-scheduler entry calling `shelves:refresh` is deployment config, not yet wired anywhere
 - [ ] Admin API for shelf CRUD — deliberately deferred; needs an admin/role concept the codebase doesn't have. The service layer is already the seam an API would sit on
 - [ ] View-based trending — `trending` ranks on review activity today; a denser signal (impressions/saves) would be a new resolver plus its own tracking infra
+
+### Milestone 12 — Categories + long-form user bio ✅
+- [x] `User.about` — long-form profile body (max 5000, Zod), update-only, alongside the short `bio`
+- [x] `Category` / `RecipeCategory` models replace the `Recipe.category String?` column and its `@@index([category])` — Phase 2 normalization, per the old Schema-decisions note
+- [x] `src/modules/categories/` — router / controller / service / schema + `categories.config.ts`, the curated registry
+- [x] `GET /categories` — public, `readLimiter`, unpaginated, every category with its `recipeCount` (zero-count included)
+- [x] `resolveCategories` gates every recipe write: unknown slug → `422`, resolved before the transaction opens so nothing half-writes
+- [x] `npm run categories:sync` — validates the whole config before writing, upserts by slug, reports (never deletes) categories absent from the file
+- [x] `categories: string[]` replaces `category` in every recipe request and response; `?category=<slug>` filters through the join table
+- [x] Meilisearch document/index attributes moved to `categories: string[]`; `trending` resolver's category filter moved to the relation
+- [x] Documented in OpenAPI spec (`src/docs/openapi.ts`) under the `Categories` tag
+- [x] Unit tests: category service + schema/config, plus updated recipe/search/shelf/user suites (20 new tests)
+- [ ] Category images/descriptions for a browse-page tile — the model is `name`/`slug` only; richer fields are additive
+- [ ] Admin API for category CRUD — deliberately deferred, same reasoning as shelves (no admin/role concept yet)
+- [ ] Backfill of the old `recipes.category` values — deliberately skipped; the migration drops the column

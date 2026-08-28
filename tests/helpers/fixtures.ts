@@ -13,7 +13,8 @@ export function buildRecipe(authorId: string, overrides: Record<string, unknown>
     slug: `test-recipe-${Math.random().toString(36).slice(2)}`,
     title: 'Test Recipe',
     description: 'A test recipe description',
-    category: 'test',
+    // Categories are a relation now (recipe_categories), not a column — link them explicitly
+    // in the test that needs them rather than defaulting one here.
     authorId,
     ...overrides,
   };

@@ -20,6 +20,10 @@ export const updateUserSchema = z.object({
   username: usernameField.optional(),
   displayName: z.string().min(1).max(80).optional(),
   bio: z.string().max(500).optional(),
+  // The long-form counterpart to `bio`: a profile page's main body text, where `bio` is the
+  // one-liner shown next to an avatar. Same authoring path — update-only, never part of
+  // provisioning.
+  about: z.string().max(5000).optional(),
   avatarUrl: trustedImageUrlSchema.optional(),
 });
 

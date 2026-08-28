@@ -13,6 +13,7 @@ async function main() {
     include: {
       author: { select: { id: true, username: true, displayName: true } },
       recipeTags: { include: { tag: true } },
+      recipeCategories: { include: { category: true } },
     },
   });
 
@@ -21,14 +22,18 @@ async function main() {
     slug: r.slug,
     title: r.title,
     description: r.description ?? null,
-    category: r.category,
+    authorNote: r.authorNote ?? null,
+    categories: r.recipeCategories.map((rc) => rc.category.slug),
     coverImageUrl: r.coverImageUrl,
     imageUrls: r.imageUrls,
+    videoUrl: r.videoUrl,
     prepTimeMinutes: r.prepTimeMinutes,
     difficulty: r.difficulty ?? null,
     authorId: r.authorId,
     author: { id: r.author.id, username: r.author.username, displayName: r.author.displayName },
     tags: r.recipeTags.map((rt) => rt.tag.slug),
+    averageRating: r.averageRating,
+    reviewCount: r.reviewCount,
     createdAt: r.createdAt.toISOString(),
   }));
 

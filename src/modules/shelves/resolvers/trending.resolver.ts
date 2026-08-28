@@ -27,7 +27,9 @@ export const trendingResolver: ShelfResolver<TrendingCriteria> = {
 
     // Same AND-of-tags semantics as listRecipes, applied to the review's recipe relation.
     const recipeFilter: Prisma.RecipeWhereInput = {
-      ...(criteria.category && { category: criteria.category }),
+      ...(criteria.category && {
+        recipeCategories: { some: { category: { slug: criteria.category } } },
+      }),
       ...(tagSlugs.length > 0 && {
         AND: tagSlugs.map((slug) => ({ recipeTags: { some: { tag: { slug } } } })),
       }),

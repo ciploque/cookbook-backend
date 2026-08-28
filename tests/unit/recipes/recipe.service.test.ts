@@ -22,6 +22,9 @@ vi.mock('../../../src/config/database', () => ({
     collectionRecipe: {
       findFirst: vi.fn(),
     },
+    recipeCategory: {
+      deleteMany: vi.fn(),
+    },
     $transaction: vi.fn(),
     $executeRaw: vi.fn(),
   },
@@ -29,6 +32,12 @@ vi.mock('../../../src/config/database', () => ({
 
 vi.mock('../../../src/modules/tags/tag.service', () => ({
   upsertTags: vi.fn(),
+}));
+
+// Categories are curated: the service resolves slugs against the Category table and throws
+// 422 on an unknown one, so it's stubbed here the same way tag upsert is.
+vi.mock('../../../src/modules/categories/category.service', () => ({
+  resolveCategories: vi.fn(),
 }));
 
 vi.mock('../../../src/utils/slugify', () => ({
@@ -50,6 +59,7 @@ vi.mock('../../../src/modules/storage/storage.service', () => ({
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../../src/config/database';
+import { ApiError } from '../../../src/utils/ApiError';
 import {
   deleteIndexedRecipe,
   indexRecipe,
@@ -57,6 +67,7 @@ import {
   updateIndexedRecipe,
 } from '../../../src/modules/recipes/recipe.search';
 import { upsertTags } from '../../../src/modules/tags/tag.service';
+import { resolveCategories } from '../../../src/modules/categories/category.service';
 import { deleteImage, storeImage } from '../../../src/modules/storage/storage.service';
 import {
   addGalleryImages,
@@ -90,7 +101,6 @@ const mockRecipeFull = {
   title: 'Pasta Carbonara',
   description: 'Classic Roman pasta dish',
   authorNote: 'A family favorite',
-  category: 'pasta',
   coverImageUrl: null,
   imageUrls: [],
   videoUrl: null,
@@ -106,6 +116,7 @@ const mockRecipeFull = {
   ingredients: [{ id: 'ing-1', recipeId: 'recipe-uuid', name: 'Spaghetti', quantity: 400, unit: null, notes: null, order: 0 }],
   steps: [{ id: 'step-1', recipeId: 'recipe-uuid', order: 1, instruction: 'Boil pasta', imageUrl: null }],
   recipeTags: [{ tag: { id: 'tag-1', name: 'italian', slug: 'italian' } }],
+  recipeCategories: [{ category: { id: 'cat-1', name: 'Pasta', slug: 'pasta' } }],
 };
 
 const mockRecipeListItem = {
@@ -114,7 +125,13 @@ const mockRecipeListItem = {
   author: { id: 'author-uuid', username: 'joao', displayName: 'João' },
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // clearAllMocks resets calls but not implementations, and every write path awaits this —
+  // an unset mock resolves to undefined and blows up on `.map`. Re-established per test so a
+  // case that makes it throw (unknown category) can't leak into the next one.
+  vi.mocked(resolveCategories).mockResolvedValue([]);
+});
 
 // ─── getRecipeById ────────────────────────────────────────────────────────────
 
@@ -277,23 +294,26 @@ describe('createRecipe()', () => {
     await expect(
       createRecipe('user_unknown', {
         title: 'Test', description: 'desc',
-        tags: [], ingredients: [], steps: [],
+        tags: [], categories: [], ingredients: [], steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
 
     expect(prisma.recipe.create).not.toHaveBeenCalled();
   });
 
-  it('creates recipe with generated slug and upserted tags', async () => {
+  it('creates recipe with generated slug, upserted tags and resolved categories', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(upsertTags).mockResolvedValue([{ id: 'tag-1', name: 'italian', slug: 'italian' }]);
+    vi.mocked(resolveCategories).mockResolvedValue([
+      { id: 'cat-1', name: 'Pasta', slug: 'pasta' },
+    ]);
     vi.mocked(prisma.recipe.create).mockResolvedValue(mockRecipeFull as never);
 
     const result = await createRecipe('user_author', {
       title: 'Pasta Carbonara',
       description: 'Classic Roman pasta dish',
       authorNote: 'A family favorite',
-      category: 'pasta',
+      categories: ['pasta'],
       videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
       tags: ['italian'],
       ingredients: [{ name: 'Spaghetti', quantity: 400 }],
@@ -301,6 +321,7 @@ describe('createRecipe()', () => {
     });
 
     expect(upsertTags).toHaveBeenCalledWith(['italian']);
+    expect(resolveCategories).toHaveBeenCalledWith(['pasta']);
     expect(prisma.recipe.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -308,10 +329,13 @@ describe('createRecipe()', () => {
           authorId: 'author-uuid',
           videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
           authorNote: 'A family favorite',
+          // Linked through the join table, by resolved row id — never a raw string.
+          recipeCategories: { create: [{ categoryId: 'cat-1' }] },
         }),
       }),
     );
     expect(result).toHaveProperty('tags', ['italian']);
+    expect(result).toHaveProperty('categories', ['pasta']);
     expect(indexRecipe).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'recipe-uuid',
@@ -319,8 +343,28 @@ describe('createRecipe()', () => {
         authorId: 'author-uuid',
         authorNote: 'A family favorite',
         tags: ['italian'],
+        categories: ['pasta'],
       }),
     );
+  });
+
+  it('rejects an unknown category with 422 before writing anything', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(resolveCategories).mockRejectedValue(
+      ApiError.validation({ categories: ['Unknown category: nope'] }),
+    );
+
+    await expect(
+      createRecipe('user_author', {
+        title: 'Test', description: 'desc',
+        tags: [], categories: ['nope'], ingredients: [], steps: [],
+      }),
+    ).rejects.toMatchObject({ statusCode: 422, code: 'VALIDATION_ERROR' });
+
+    // Resolved before the create, so a bad slug leaves no half-written recipe behind.
+    expect(prisma.recipe.create).not.toHaveBeenCalled();
+    expect(indexRecipe).not.toHaveBeenCalled();
   });
 
   it('assigns order indices to ingredients in array order', async () => {
@@ -331,7 +375,7 @@ describe('createRecipe()', () => {
     await createRecipe('user_author', {
       title: 'Test',
       description: 'desc',
-      category: 'cat',
+      categories: [],
       tags: [],
       ingredients: [
         { name: 'Flour', quantity: 200 },
@@ -360,7 +404,7 @@ describe('createRecipe()', () => {
     await expect(
       createRecipe('user_author', {
         title: 'Pasta Carbonara', description: 'desc',
-        tags: [], ingredients: [], steps: [],
+        tags: [], categories: [], ingredients: [], steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
 
@@ -375,7 +419,7 @@ describe('createRecipe()', () => {
     await expect(
       createRecipe('user_author', {
         title: 'Test', description: 'desc',
-        tags: [], ingredients: [], steps: [],
+        tags: [], categories: [], ingredients: [], steps: [],
       }),
     ).rejects.toThrow('DB connection lost');
   });
@@ -430,6 +474,7 @@ function mockUpdateTransaction() {
   const ingredientDeleteMany = vi.fn();
   const stepDeleteMany = vi.fn();
   const tagDeleteMany = vi.fn();
+  const categoryDeleteMany = vi.fn();
   const update = vi.fn().mockResolvedValue(mockRecipeFull);
 
   vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
@@ -437,16 +482,18 @@ function mockUpdateTransaction() {
       recipeIngredient: { deleteMany: ingredientDeleteMany },
       recipeStep: { deleteMany: stepDeleteMany },
       recipeTag: { deleteMany: tagDeleteMany },
+      recipeCategory: { deleteMany: categoryDeleteMany },
       recipe: { update },
     } as never),
   );
 
-  return { ingredientDeleteMany, stepDeleteMany, tagDeleteMany, update };
+  return { ingredientDeleteMany, stepDeleteMany, tagDeleteMany, categoryDeleteMany, update };
 }
 
 const updateInput = {
   title: 'Updated Carbonara',
   tags: ['italian'],
+  categories: [],
   ingredients: [{ name: 'Guanciale' }, { name: 'Pecorino' }],
   steps: [{ order: 1, instruction: 'Render the guanciale' }],
 };
@@ -458,10 +505,11 @@ describe('updateRecipe()', () => {
 
     await updateRecipe('recipe-uuid', updateInput);
 
-    // A PUT that only appended would leave the previous ingredients/steps/tags behind.
+    // A PUT that only appended would leave the previous ingredients/steps/tags/categories behind.
     expect(tx.ingredientDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
     expect(tx.stepDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
     expect(tx.tagDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
+    expect(tx.categoryDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 
@@ -503,6 +551,35 @@ describe('updateRecipe()', () => {
         }),
       }),
     );
+  });
+
+  it('links the resolved category rows and rejects an unknown slug before the transaction', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(resolveCategories).mockResolvedValue([
+      { id: 'cat-1', name: 'Pasta', slug: 'pasta' },
+    ]);
+    const tx = mockUpdateTransaction();
+
+    await updateRecipe('recipe-uuid', { ...updateInput, categories: ['pasta'] });
+
+    expect(resolveCategories).toHaveBeenCalledWith(['pasta']);
+    expect(tx.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          recipeCategories: { create: [{ categoryId: 'cat-1' }] },
+        }),
+      }),
+    );
+
+    vi.mocked(resolveCategories).mockRejectedValue(
+      ApiError.validation({ categories: ['Unknown category: nope'] }),
+    );
+    vi.mocked(prisma.$transaction).mockClear();
+
+    await expect(
+      updateRecipe('recipe-uuid', { ...updateInput, categories: ['nope'] }),
+    ).rejects.toMatchObject({ statusCode: 422, code: 'VALIDATION_ERROR' });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('never writes slug — it is immutable even when the title changes', async () => {
@@ -593,6 +670,7 @@ describe('patchRecipe()', () => {
         recipeIngredient: { deleteMany: vi.fn() },
         recipeStep: { deleteMany: vi.fn() },
         recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
         recipe: { update: updateMock },
       } as never),
     );
@@ -612,6 +690,7 @@ describe('patchRecipe()', () => {
         recipeIngredient: { deleteMany: vi.fn() },
         recipeStep: { deleteMany: vi.fn() },
         recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
         recipe: { update: updateMock },
       } as never),
     );
@@ -630,6 +709,7 @@ describe('patchRecipe()', () => {
         recipeIngredient: { deleteMany: vi.fn() },
         recipeStep: { deleteMany: vi.fn() },
         recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
         recipe: { update: updateMock },
       } as never),
     );
@@ -649,6 +729,7 @@ describe('patchRecipe()', () => {
         recipeIngredient: { deleteMany: vi.fn() },
         recipeStep: { deleteMany: vi.fn() },
         recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
         recipe: { update: updateMock },
       } as never),
     );
@@ -670,7 +751,9 @@ describe('patchRecipe()', () => {
     expect(tx.ingredientDeleteMany).toHaveBeenCalledWith({ where: { recipeId: 'recipe-uuid' } });
     expect(tx.stepDeleteMany).not.toHaveBeenCalled();
     expect(tx.tagDeleteMany).not.toHaveBeenCalled();
+    expect(tx.categoryDeleteMany).not.toHaveBeenCalled();
     expect(upsertTags).not.toHaveBeenCalled();
+    expect(resolveCategories).not.toHaveBeenCalled();
   });
 
   it('leaves every child section alone when the body is metadata only', async () => {
@@ -682,10 +765,12 @@ describe('patchRecipe()', () => {
     expect(tx.ingredientDeleteMany).not.toHaveBeenCalled();
     expect(tx.stepDeleteMany).not.toHaveBeenCalled();
     expect(tx.tagDeleteMany).not.toHaveBeenCalled();
+    expect(tx.categoryDeleteMany).not.toHaveBeenCalled();
     const data = tx.update.mock.calls[0][0].data;
     expect(data).not.toHaveProperty('ingredients');
     expect(data).not.toHaveProperty('steps');
     expect(data).not.toHaveProperty('recipeTags');
+    expect(data).not.toHaveProperty('recipeCategories');
   });
 
   // `tags: []` is a real instruction ("remove all tags"), not an absent field — the
@@ -742,6 +827,16 @@ describe('listRecipes()', () => {
     expect(result.data[0]).not.toHaveProperty('recipeTags');
   });
 
+  it('maps recipeCategories to a flat categories array', async () => {
+    vi.mocked(prisma.recipe.count).mockResolvedValue(1);
+    vi.mocked(prisma.recipe.findMany).mockResolvedValue([mockRecipeListItem] as never);
+
+    const result = await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' });
+
+    expect(result.data[0]).toHaveProperty('categories', ['pasta']);
+    expect(result.data[0]).not.toHaveProperty('recipeCategories');
+  });
+
   it('filters by tag slugs when tags query param is provided', async () => {
     vi.mocked(prisma.recipe.count).mockResolvedValue(0);
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
@@ -752,14 +847,18 @@ describe('listRecipes()', () => {
     expect(whereArg).toHaveProperty('AND');
   });
 
-  it('filters by category with a plain equality match (not mode: insensitive)', async () => {
+  it('filters by category through the join table on the unique slug', async () => {
     vi.mocked(prisma.recipe.count).mockResolvedValue(0);
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
 
     await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', category: 'pasta' });
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
-    expect(whereArg).toMatchObject({ category: 'pasta' });
+    // `some`, not an equality on the recipe row: a recipe can carry several categories and
+    // matches if the filtered slug is among them.
+    expect(whereArg).toMatchObject({
+      recipeCategories: { some: { category: { slug: 'pasta' } } },
+    });
   });
 
   it('filters by minRating when provided', async () => {

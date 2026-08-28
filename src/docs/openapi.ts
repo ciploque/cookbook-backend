@@ -43,6 +43,7 @@ const UserSchema = registry.register(
     username: z.string(),
     displayName: z.string(),
     bio: z.string().nullable(),
+    about: z.string().nullable(),
     avatarUrl: z.string().nullable(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -56,6 +57,7 @@ const PublicUserSchema = registry.register(
     username: z.string(),
     displayName: z.string(),
     bio: z.string().nullable(),
+    about: z.string().nullable(),
     avatarUrl: z.string().nullable(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -93,7 +95,7 @@ const RecipeDetailSchema = registry.register(
     title: z.string(),
     description: z.string().nullable(),
     authorNote: z.string().nullable(),
-    category: z.string().nullable(),
+    categories: z.array(z.string()),
     tags: z.array(z.string()),
     coverImageUrl: z.string().nullable(),
     imageUrls: z.array(z.string()),
@@ -129,7 +131,7 @@ const RecipeListItemSchema = registry.register(
     title: z.string(),
     description: z.string(),
     authorNote: z.string().nullable(),
-    category: z.string().nullable(),
+    categories: z.array(z.string()),
     tags: z.array(z.string()),
     coverImageUrl: z.string().nullable(),
     imageUrls: z.array(z.string()),
@@ -888,6 +890,40 @@ registry.registerPath({
     404: {
       description: 'Recipe not found',
       content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+const CategorySchema = registry.register(
+  'Category',
+  z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    slug: z.string(),
+    recipeCount: z.number().int(),
+  }),
+);
+
+registry.registerPath({
+  method: 'get',
+  path: '/api/v1/categories',
+  tags: ['Categories'],
+  summary: 'List all categories with recipe counts',
+  description:
+    'Every category in the curated registry, with the number of recipes in each — ordered by name. ' +
+    'Deliberately unpaginated: the list is small and a category nav wants all of it at once. ' +
+    'Categories with no recipes are included. There are no write endpoints: the registry is ' +
+    'src/modules/categories/categories.config.ts, applied with `npm run categories:sync`.',
+  responses: {
+    200: {
+      description: 'All categories',
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: z.array(CategorySchema) }),
+        },
+      },
     },
   },
 });
@@ -1664,7 +1700,7 @@ registry.registerPath({
   description:
     'Every active shelf whose publish window contains the current time, ordered by position, each with its ' +
     'recipes in shelf order. Contents are a precomputed snapshot rewritten by `npm run shelves:refresh`, so ' +
-    'this costs the same regardless of how expensive a shelf\'s criteria are. Shelves that currently resolve ' +
+    "this costs the same regardless of how expensive a shelf's criteria are. Shelves that currently resolve " +
     'to zero recipes are omitted, so the response never contains an empty row. Not paginated — the number of ' +
     'shelves is small and editorially controlled.',
   responses: {

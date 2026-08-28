@@ -33,7 +33,7 @@ const baseHit = {
   slug: 'test-abcd',
   title: 'Test Recipe',
   description: null,
-  category: 'pasta',
+  categories: ['pasta'],
   coverImageUrl: null,
   imageUrls: [],
   prepTimeMinutes: null,
@@ -201,7 +201,8 @@ describe('searchRecipesViaMeili() — filter string escaping', () => {
     expect(mockSearch).toHaveBeenCalledWith(
       'pasta',
       expect.objectContaining({
-        filter: ['category = "cooking\\" OR authorId != \\"00000000"'],
+        // Array-contains against the categories field, same form as the tag clauses.
+        filter: ['categories = "cooking\\" OR authorId != \\"00000000"'],
       }),
     );
   });

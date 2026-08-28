@@ -19,10 +19,10 @@ export const createRecipeSchema = z.object({
   title: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   authorNote: z.string().max(300).optional(),
-  // Normalized to lowercase so filtering can use a plain equality match against the
-  // existing `@@index([category])` — a case-insensitive Prisma filter (`mode: 'insensitive'`)
-  // can't use that index and would force a sequential scan as the table grows.
-  category: z.string().min(1).trim().toLowerCase().optional(),
+  // Category *slugs*, resolved against the curated Category table by the service — an unknown
+  // slug is a 422, unlike tags which are created on the fly. Lowercased here so the lookup is
+  // a plain equality match against `Category.slug`, which is unique and therefore indexed.
+  categories: z.array(z.string().min(1).trim().toLowerCase()).max(5).default([]),
   tags: z.array(z.string().min(1)).max(20).default([]),
   videoUrl: trustedVideoUrlSchema.optional(),
   prepTimeMinutes: z.number().int().min(0).optional(),
@@ -49,6 +49,7 @@ export const recipeQuerySchema = z.object({
       message: 'A maximum of 20 tags can be filtered at once',
     })
     .optional(),
+  // A single category slug; a recipe matches if it carries that category among its own.
   category: z.string().max(100).trim().toLowerCase().optional(),
   authorId: z.string().uuid().optional(),
   minRating: z.coerce.number().min(1).max(5).optional(),

@@ -13,6 +13,7 @@ model User {
   username       String   @unique
   displayName    String
   bio            String?
+  about          String?
   avatarUrl      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -32,7 +33,6 @@ model Recipe {
   title           String
   description     String?
   authorNote      String?
-  category        String?
   coverImageUrl   String?
   imageUrls       String[]
   videoUrl        String?
@@ -46,18 +46,18 @@ model Recipe {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  author      User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  ingredients RecipeIngredient[]
-  steps       RecipeStep[]
-  recipeTags  RecipeTag[]
-  reviews     Review[]
-  collections CollectionRecipe[]
-  reports     Report[]
-  shelfItems  ShelfItem[]
+  author           User               @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  ingredients      RecipeIngredient[]
+  steps            RecipeStep[]
+  recipeTags       RecipeTag[]
+  recipeCategories RecipeCategory[]
+  reviews          Review[]
+  collections      CollectionRecipe[]
+  reports          Report[]
+  shelfItems       ShelfItem[]
 
   @@unique([authorId, slug])
   @@index([authorId])
-  @@index([category])
   @@index([averageRating])
   @@map("recipes")
 }
@@ -111,6 +111,31 @@ model RecipeTag {
   @@id([recipeId, tagId])
   @@index([tagId])
   @@map("recipe_tags")
+}
+
+// Categories are normalized and *curated*: unlike tags, they are not created on the fly by a
+// recipe write. The registry is src/modules/categories/categories.config.ts, applied by
+// `npm run categories:sync`; an unknown slug on a recipe write is a 422.
+model Category {
+  id   String @id @default(uuid(7)) @db.Uuid
+  name String @unique
+  slug String @unique
+
+  recipeCategories RecipeCategory[]
+
+  @@map("categories")
+}
+
+model RecipeCategory {
+  recipeId   String @db.Uuid
+  categoryId String @db.Uuid
+
+  recipe   Recipe   @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([recipeId, categoryId])
+  @@index([categoryId])
+  @@map("recipe_categories")
 }
 
 model Review {

@@ -46,7 +46,6 @@ function buildRecipe(id: string, overrides = {}) {
     title: `Recipe ${id}`,
     description: null,
     authorNote: null,
-    category: null,
     coverImageUrl: null,
     imageUrls: [],
     videoUrl: null,
@@ -57,6 +56,7 @@ function buildRecipe(id: string, overrides = {}) {
     createdAt: new Date('2024-01-01'),
     author: { id: 'author-uuid', username: 'joao', displayName: 'João' },
     recipeTags: [],
+    recipeCategories: [],
     ...overrides,
   };
 }
