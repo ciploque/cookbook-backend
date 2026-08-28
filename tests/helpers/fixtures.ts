@@ -1,6 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 
-export function buildUser(overrides: Partial<Parameters<PrismaClient['user']['create']>[0]['data']> = {}) {
+export function buildUser(
+  overrides: Partial<Parameters<PrismaClient['user']['create']>[0]['data']> = {},
+) {
   return {
     authProviderId: `user_${Math.random().toString(36).slice(2)}`,
     displayName: 'Test User',

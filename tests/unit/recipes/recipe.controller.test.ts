@@ -49,7 +49,14 @@ const AUTH = ['x-dev-user-sub', 'user_author'] as const;
 const UUID = '01a005f1-abca-7302-8cc6-e9762dea4932';
 
 const recipe = { id: UUID, slug: 'pasta-carbonara', title: 'Pasta Carbonara', tags: ['italian'] };
-const meta = { page: 1, limit: 20, total: 1, totalPages: 1, hasNextPage: false, hasPrevPage: false };
+const meta = {
+  page: 1,
+  limit: 20,
+  total: 1,
+  totalPages: 1,
+  hasNextPage: false,
+  hasPrevPage: false,
+};
 const validBody = { title: 'Pasta Carbonara', tags: ['italian'], ingredients: [], steps: [] };
 const jpeg = (name = 'a.jpg'): [Buffer, { filename: string; contentType: string }] => [
   Buffer.from(`bytes-of-${name}`),

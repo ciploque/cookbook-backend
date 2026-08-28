@@ -114,8 +114,20 @@ const mockRecipeFull = {
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
   author: { id: 'author-uuid', username: 'joao', displayName: 'João', avatarUrl: null },
-  ingredients: [{ id: 'ing-1', recipeId: 'recipe-uuid', name: 'Spaghetti', quantity: 400, unit: null, notes: null, order: 0 }],
-  steps: [{ id: 'step-1', recipeId: 'recipe-uuid', order: 1, instruction: 'Boil pasta', imageUrl: null }],
+  ingredients: [
+    {
+      id: 'ing-1',
+      recipeId: 'recipe-uuid',
+      name: 'Spaghetti',
+      quantity: 400,
+      unit: null,
+      notes: null,
+      order: 0,
+    },
+  ],
+  steps: [
+    { id: 'step-1', recipeId: 'recipe-uuid', order: 1, instruction: 'Boil pasta', imageUrl: null },
+  ],
   recipeTags: [{ tag: { id: 'tag-1', name: 'italian', slug: 'italian' } }],
   recipeCategories: [{ category: { id: 'cat-1', name: 'Pasta', slug: 'pasta' } }],
 };
@@ -239,7 +251,9 @@ describe('getRecipeByUsernameAndSlug()', () => {
   it('throws RECIPE_NOT_FOUND when username does not match', async () => {
     vi.mocked(prisma.recipe.findFirst).mockResolvedValue(null);
 
-    await expect(getRecipeByUsernameAndSlug('wrong-user', 'pasta-carbonara-abcd')).rejects.toMatchObject({
+    await expect(
+      getRecipeByUsernameAndSlug('wrong-user', 'pasta-carbonara-abcd'),
+    ).rejects.toMatchObject({
       statusCode: 404,
       code: 'RECIPE_NOT_FOUND',
     });
@@ -294,8 +308,12 @@ describe('createRecipe()', () => {
 
     await expect(
       createRecipe('user_unknown', {
-        title: 'Test', description: 'desc',
-        tags: [], categories: [], ingredients: [], steps: [],
+        title: 'Test',
+        description: 'desc',
+        tags: [],
+        categories: [],
+        ingredients: [],
+        steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
 
@@ -305,9 +323,7 @@ describe('createRecipe()', () => {
   it('creates recipe with generated slug, upserted tags and resolved categories', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(upsertTags).mockResolvedValue([{ id: 'tag-1', name: 'italian', slug: 'italian' }]);
-    vi.mocked(resolveCategories).mockResolvedValue([
-      { id: 'cat-1', name: 'Pasta', slug: 'pasta' },
-    ]);
+    vi.mocked(resolveCategories).mockResolvedValue([{ id: 'cat-1', name: 'Pasta', slug: 'pasta' }]);
     vi.mocked(prisma.recipe.create).mockResolvedValue(mockRecipeFull as never);
 
     const result = await createRecipe('user_author', {
@@ -358,8 +374,12 @@ describe('createRecipe()', () => {
 
     await expect(
       createRecipe('user_author', {
-        title: 'Test', description: 'desc',
-        tags: [], categories: ['nope'], ingredients: [], steps: [],
+        title: 'Test',
+        description: 'desc',
+        tags: [],
+        categories: ['nope'],
+        ingredients: [],
+        steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 422, code: 'VALIDATION_ERROR' });
 
@@ -371,7 +391,10 @@ describe('createRecipe()', () => {
   it('assigns order indices to ingredients in array order', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockAuthor as never);
     vi.mocked(upsertTags).mockResolvedValue([]);
-    vi.mocked(prisma.recipe.create).mockResolvedValue({ ...mockRecipeFull, recipeTags: [] } as never);
+    vi.mocked(prisma.recipe.create).mockResolvedValue({
+      ...mockRecipeFull,
+      recipeTags: [],
+    } as never);
 
     await createRecipe('user_author', {
       title: 'Test',
@@ -404,8 +427,12 @@ describe('createRecipe()', () => {
 
     await expect(
       createRecipe('user_author', {
-        title: 'Pasta Carbonara', description: 'desc',
-        tags: [], categories: [], ingredients: [], steps: [],
+        title: 'Pasta Carbonara',
+        description: 'desc',
+        tags: [],
+        categories: [],
+        ingredients: [],
+        steps: [],
       }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
 
@@ -419,8 +446,12 @@ describe('createRecipe()', () => {
 
     await expect(
       createRecipe('user_author', {
-        title: 'Test', description: 'desc',
-        tags: [], categories: [], ingredients: [], steps: [],
+        title: 'Test',
+        description: 'desc',
+        tags: [],
+        categories: [],
+        ingredients: [],
+        steps: [],
       }),
     ).rejects.toThrow('DB connection lost');
   });
@@ -556,9 +587,7 @@ describe('updateRecipe()', () => {
 
   it('links the resolved category rows and rejects an unknown slug before the transaction', async () => {
     vi.mocked(upsertTags).mockResolvedValue([]);
-    vi.mocked(resolveCategories).mockResolvedValue([
-      { id: 'cat-1', name: 'Pasta', slug: 'pasta' },
-    ]);
+    vi.mocked(resolveCategories).mockResolvedValue([{ id: 'cat-1', name: 'Pasta', slug: 'pasta' }]);
     const tx = mockUpdateTransaction();
 
     await updateRecipe('recipe-uuid', { ...updateInput, categories: ['pasta'] });
@@ -679,7 +708,9 @@ describe('patchRecipe()', () => {
     await patchRecipe('recipe-uuid', { videoUrl: 'https://vimeo.com/12345' });
 
     expect(updateMock).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ videoUrl: 'https://vimeo.com/12345' }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ videoUrl: 'https://vimeo.com/12345' }),
+      }),
     );
   });
 
@@ -796,12 +827,19 @@ describe('listRecipes()', () => {
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([mockRecipeListItem] as never);
 
     const result = await listRecipes({
-      page: 2, limit: 20, sortBy: 'createdAt', order: 'desc',
+      page: 2,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     expect(result.meta).toMatchObject({
-      page: 2, limit: 20, total: 45, totalPages: 3,
-      hasNextPage: true, hasPrevPage: true,
+      page: 2,
+      limit: 20,
+      total: 45,
+      totalPages: 3,
+      hasNextPage: true,
+      hasPrevPage: true,
     });
     expect(result.data).toHaveLength(1);
   });
@@ -842,7 +880,13 @@ describe('listRecipes()', () => {
     vi.mocked(prisma.recipe.count).mockResolvedValue(0);
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
 
-    await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', tags: 'italian,pasta' });
+    await listRecipes({
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+      tags: 'italian,pasta',
+    });
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
     expect(whereArg).toHaveProperty('AND');
@@ -852,7 +896,13 @@ describe('listRecipes()', () => {
     vi.mocked(prisma.recipe.count).mockResolvedValue(0);
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
 
-    await listRecipes({ page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', category: 'pasta' });
+    await listRecipes({
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+      category: 'pasta',
+    });
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
     // `some`, not an equality on the recipe row: a recipe can carry several categories and
@@ -884,7 +934,13 @@ describe('listRecipes()', () => {
   });
 
   it('delegates to searchRecipesViaMeili when q is provided', async () => {
-    const query = { q: 'carbonara', page: 1, limit: 20, sortBy: 'createdAt' as const, order: 'desc' as const };
+    const query = {
+      q: 'carbonara',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt' as const,
+      order: 'desc' as const,
+    };
     vi.mocked(searchRecipesViaMeili).mockResolvedValue({
       data: [],
       meta: { page: 1, limit: 20, total: 0, totalPages: 0, hasNextPage: false, hasPrevPage: false },
@@ -953,7 +1009,13 @@ describe('listRecipes()', () => {
   });
 
   it('attaches isSavedInCollection to Meilisearch results too', async () => {
-    const query = { q: 'carbonara', page: 1, limit: 20, sortBy: 'createdAt' as const, order: 'desc' as const };
+    const query = {
+      q: 'carbonara',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt' as const,
+      order: 'desc' as const,
+    };
     vi.mocked(searchRecipesViaMeili).mockResolvedValue({
       data: [{ ...mockRecipeListItem, id: 'recipe-uuid' } as never],
       meta: { page: 1, limit: 20, total: 1, totalPages: 1, hasNextPage: false, hasPrevPage: false },
@@ -976,7 +1038,10 @@ describe('listRecipesByUser()', () => {
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
 
     await listRecipesByUser('author-uuid', {
-      page: 1, limit: 20, sortBy: 'createdAt', order: 'desc',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
@@ -990,7 +1055,11 @@ describe('listRecipesByUser()', () => {
     vi.mocked(prisma.recipe.findMany).mockResolvedValue([]);
 
     await listRecipesByUser('author-uuid', {
-      page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', authorId: 'someone-else-uuid',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+      authorId: 'someone-else-uuid',
     });
 
     const whereArg = vi.mocked(prisma.recipe.count).mock.calls[0][0]?.where;
@@ -1004,7 +1073,12 @@ describe('listRecipesByUser()', () => {
     });
 
     await listRecipesByUser('author-uuid', {
-      q: 'carbonara', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', category: 'pasta',
+      q: 'carbonara',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+      category: 'pasta',
     });
 
     expect(searchRecipesViaMeili).toHaveBeenCalledWith(
@@ -1028,7 +1102,9 @@ describe('listRecipesByUser()', () => {
     expect(result.data[0]).toHaveProperty('isSavedInCollection', true);
     expect(prisma.collectionRecipe.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ collection: { owner: { authProviderId: 'user_viewer' } } }),
+        where: expect.objectContaining({
+          collection: { owner: { authProviderId: 'user_viewer' } },
+        }),
       }),
     );
   });
@@ -1142,7 +1218,10 @@ describe('addGalleryImages()', () => {
   });
 
   it('rejects (fast path) without storing when the gallery would exceed 10 images', async () => {
-    const existingKeys = Array.from({ length: 9 }, (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`);
+    const existingKeys = Array.from(
+      { length: 9 },
+      (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`,
+    );
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: existingKeys,
@@ -1157,7 +1236,10 @@ describe('addGalleryImages()', () => {
   });
 
   it('allows exactly reaching the 10-image cap', async () => {
-    const existingKeys = Array.from({ length: 9 }, (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`);
+    const existingKeys = Array.from(
+      { length: 9 },
+      (_, i) => `/recipes/recipe-uuid/gallery/${i}.jpg`,
+    );
     vi.mocked(prisma.recipe.findUnique).mockResolvedValue({
       ...mockRecipeFull,
       imageUrls: existingKeys,

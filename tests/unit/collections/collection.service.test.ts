@@ -26,7 +26,7 @@ vi.mock('../../../src/config/database', () => ({
 
 import { prisma } from '../../../src/config/database';
 import {
-  listPublicCollectionsByUser,
+  listCollectionsByUser,
   listMyCollections,
   getCollectionById,
   createCollection,
@@ -50,6 +50,16 @@ const mockOwner = {
   avatarUrl: null,
 };
 
+function buildCollectionRecipe(order: number, coverImageUrl: string | null) {
+  const recipeId = `recipe-uuid-${order}`;
+  return {
+    collectionId: 'collection-uuid',
+    recipeId,
+    order,
+    recipe: { id: recipeId, slug: `pasta-${order}`, title: `Pasta ${order}`, coverImageUrl },
+  };
+}
+
 const mockCollectionFull = {
   id: 'collection-uuid',
   ownerId: 'owner-uuid',
@@ -58,53 +68,97 @@ const mockCollectionFull = {
   isPublic: true,
   createdAt: new Date('2024-01-01'),
   updatedAt: new Date('2024-01-01'),
-  owner: { id: 'owner-uuid', username: 'joao', displayName: 'João', avatarUrl: null, authProviderId: 'user_owner' },
+  owner: {
+    id: 'owner-uuid',
+    username: 'joao',
+    displayName: 'João',
+    avatarUrl: null,
+    authProviderId: 'user_owner',
+  },
+  // 5 entries, the 2nd without a cover — exercises both the 4-item slice and the "omit, don't
+  // backfill" rule for coverImages.
   recipes: [
-    {
-      collectionId: 'collection-uuid',
-      recipeId: 'recipe-uuid',
-      order: 0,
-      recipe: { id: 'recipe-uuid', slug: 'pasta-abcd', title: 'Pasta', coverImageUrl: null },
-    },
+    buildCollectionRecipe(0, '/recipes/r1/cover/a.jpg'),
+    buildCollectionRecipe(1, null),
+    buildCollectionRecipe(2, '/recipes/r3/cover/c.jpg'),
+    buildCollectionRecipe(3, '/recipes/r4/cover/d.jpg'),
+    buildCollectionRecipe(4, '/recipes/r5/cover/e.jpg'),
   ],
-  _count: { followers: 3 },
+  // `recipes` above is the take:50-capped array; `_count.recipes` is the real membership.
+  _count: { followers: 3, recipes: 12 },
 };
 
 const mockPrivateCollection = {
   ...mockCollectionFull,
   id: 'private-uuid',
   isPublic: false,
-  _count: { followers: 0 },
+  _count: { followers: 0, recipes: 12 },
 };
 
 const mockTargetUser = { id: 'owner-uuid', authProviderId: 'user_owner' };
 
 beforeEach(() => vi.clearAllMocks());
 
-// ─── listPublicCollectionsByUser ──────────────────────────────────────────────
+// ─── listCollectionsByUser ────────────────────────────────────────────────────
 
-describe('listPublicCollectionsByUser()', () => {
-  it('always filters to public collections, regardless of caller', async () => {
+describe('listCollectionsByUser()', () => {
+  function mockList(collections: unknown[]) {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockTargetUser as never);
-    vi.mocked(prisma.collection.count).mockResolvedValue(1);
-    vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull] as never);
+    vi.mocked(prisma.collection.count).mockResolvedValue(collections.length);
+    vi.mocked(prisma.collection.findMany).mockResolvedValue(collections as never);
+  }
 
-    const result = await listPublicCollectionsByUser('owner-uuid', { page: 1, limit: 20 });
+  const whereArg = () => vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
 
-    const whereArg = vi.mocked(prisma.collection.count).mock.calls[0][0]?.where;
-    expect(whereArg).toMatchObject({ ownerId: 'owner-uuid', isPublic: true });
+  it('filters to public collections for an anonymous caller', async () => {
+    mockList([mockCollectionFull]);
+
+    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 });
+
+    expect(whereArg()).toMatchObject({ ownerId: 'owner-uuid', isPublic: true });
     expect(result.data).toHaveLength(1);
     expect(result.data[0]).toHaveProperty('followerCount', 3);
     expect(result.data[0].owner).not.toHaveProperty('authProviderId');
   });
 
+  it('filters to public collections for a signed-in caller who is not the owner', async () => {
+    mockList([mockCollectionFull]);
+
+    await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_someone_else');
+
+    expect(whereArg()).toMatchObject({ ownerId: 'owner-uuid', isPublic: true });
+  });
+
+  it('returns private collections too when the caller is the listed user', async () => {
+    mockList([mockCollectionFull, mockPrivateCollection]);
+
+    const result = await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
+
+    expect(whereArg()).toMatchObject({ ownerId: 'owner-uuid' });
+    expect(whereArg()).not.toHaveProperty('isPublic');
+    expect(result.data).toHaveLength(2);
+  });
+
+  it('resolves ownership from the target user row, not the requested id', async () => {
+    mockList([mockCollectionFull]);
+
+    await listCollectionsByUser('owner-uuid', { page: 1, limit: 20 }, 'user_owner');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 'owner-uuid' },
+      select: { id: true, authProviderId: true },
+    });
+  });
+
   it('throws USER_NOT_FOUND when user does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(listPublicCollectionsByUser('missing-id', { page: 1, limit: 20 })).rejects.toMatchObject({
-      statusCode: 404,
-      code: 'USER_NOT_FOUND',
-    });
+    await expect(listCollectionsByUser('missing-id', { page: 1, limit: 20 })).rejects.toMatchObject(
+      {
+        statusCode: 404,
+        code: 'USER_NOT_FOUND',
+      },
+    );
   });
 });
 
@@ -114,7 +168,10 @@ describe('listMyCollections()', () => {
   it('returns all (public + private) collections for the authenticated owner', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockTargetUser as never);
     vi.mocked(prisma.collection.count).mockResolvedValue(2);
-    vi.mocked(prisma.collection.findMany).mockResolvedValue([mockCollectionFull, mockPrivateCollection] as never);
+    vi.mocked(prisma.collection.findMany).mockResolvedValue([
+      mockCollectionFull,
+      mockPrivateCollection,
+    ] as never);
 
     const result = await listMyCollections('user_owner', { page: 1, limit: 20 });
 
@@ -130,10 +187,103 @@ describe('listMyCollections()', () => {
   it('throws USER_NOT_FOUND when the authenticated user has no provisioned User row', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(listMyCollections('user_unprovisioned', { page: 1, limit: 20 })).rejects.toMatchObject({
+    await expect(
+      listMyCollections('user_unprovisioned', { page: 1, limit: 20 }),
+    ).rejects.toMatchObject({
       statusCode: 404,
       code: 'USER_NOT_FOUND',
     });
+  });
+});
+
+// ─── coverImages / recipeCount ────────────────────────────────────────────────
+
+describe('coverImages + recipeCount', () => {
+  async function listOne(collection: unknown) {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockTargetUser as never);
+    vi.mocked(prisma.collection.count).mockResolvedValue(1);
+    vi.mocked(prisma.collection.findMany).mockResolvedValue([collection] as never);
+
+    const result = await listMyCollections('user_owner', { page: 1, limit: 20 });
+    return result.data[0];
+  }
+
+  it('takes the covers of the first 4 recipes by order, omitting those without one', async () => {
+    const item = await listOne(mockCollectionFull);
+
+    // The 2nd recipe has no cover, so it is dropped — and the 5th is NOT pulled in to backfill.
+    expect(item.coverImages).toEqual([
+      '/recipes/r1/cover/a.jpg',
+      '/recipes/r3/cover/c.jpg',
+      '/recipes/r4/cover/d.jpg',
+    ]);
+  });
+
+  it('caps at 4 even when every one of the first recipes has a cover', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [0, 1, 2, 3, 4, 5].map((i) => buildCollectionRecipe(i, `/recipes/r${i}/cover.jpg`)),
+    });
+
+    expect(item.coverImages).toHaveLength(4);
+    expect(item.coverImages).toEqual([
+      '/recipes/r0/cover.jpg',
+      '/recipes/r1/cover.jpg',
+      '/recipes/r2/cover.jpg',
+      '/recipes/r3/cover.jpg',
+    ]);
+  });
+
+  it('returns only what exists when the collection has fewer than 4 recipes', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [buildCollectionRecipe(0, '/a.jpg'), buildCollectionRecipe(1, '/b.jpg')],
+      _count: { followers: 3, recipes: 2 },
+    });
+
+    expect(item.coverImages).toEqual(['/a.jpg', '/b.jpg']);
+    expect(item.recipeCount).toBe(2);
+  });
+
+  it('returns an empty array for a collection with no recipes', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [],
+      _count: { followers: 3, recipes: 0 },
+    });
+
+    expect(item.coverImages).toEqual([]);
+    expect(item.recipeCount).toBe(0);
+  });
+
+  it('returns an empty array when none of the first 4 recipes has a cover', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [0, 1, 2, 3].map((i) => buildCollectionRecipe(i, null)),
+    });
+
+    expect(item.coverImages).toEqual([]);
+  });
+
+  it('reports the true membership total, not the length of the capped recipes array', async () => {
+    const item = await listOne(mockCollectionFull);
+
+    expect(item.recipes).toHaveLength(5);
+    expect(item.recipeCount).toBe(12);
+  });
+
+  it('still returns the recipes array alongside the new fields', async () => {
+    const item = await listOne(mockCollectionFull);
+
+    expect(item.recipes[0]).toMatchObject({ recipeId: 'recipe-uuid-0', order: 0 });
+    expect(item).toHaveProperty('followerCount', 3);
+  });
+
+  it('asks Prisma for the recipe count in the same query', async () => {
+    await listOne(mockCollectionFull);
+
+    const include = vi.mocked(prisma.collection.findMany).mock.calls[0][0]?.include;
+    expect(include?._count).toMatchObject({ select: { followers: true, recipes: true } });
   });
 });
 
@@ -147,6 +297,20 @@ describe('getCollectionById()', () => {
 
     expect(result).toHaveProperty('id', 'collection-uuid');
     expect(result.owner).not.toHaveProperty('authProviderId');
+  });
+
+  // The two fields live on the shared Collection shape, so the detail GET carries them too.
+  it('carries coverImages and recipeCount on the detail response', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+
+    const result = await getCollectionById('collection-uuid');
+
+    expect(result.coverImages).toEqual([
+      '/recipes/r1/cover/a.jpg',
+      '/recipes/r3/cover/c.jpg',
+      '/recipes/r4/cover/d.jpg',
+    ]);
+    expect(result.recipeCount).toBe(12);
   });
 
   it('returns a private collection to its owner', async () => {
@@ -200,7 +364,9 @@ describe('createCollection()', () => {
   it('throws USER_NOT_FOUND when user has no profile', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(createCollection('user_unknown', { name: 'Test', isPublic: false })).rejects.toMatchObject({
+    await expect(
+      createCollection('user_unknown', { name: 'Test', isPublic: false }),
+    ).rejects.toMatchObject({
       statusCode: 404,
       code: 'USER_NOT_FOUND',
     });
@@ -236,7 +402,9 @@ describe('updateCollection()', () => {
   it('throws COLLECTION_NOT_FOUND when collection does not exist', async () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
 
-    await expect(updateCollection('missing-id', { name: 'X', isPublic: false })).rejects.toMatchObject({
+    await expect(
+      updateCollection('missing-id', { name: 'X', isPublic: false }),
+    ).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });
@@ -327,7 +495,9 @@ describe('addRecipesToCollection()', () => {
     vi.mocked(prisma.collectionRecipe.createMany).mockResolvedValue({ count: 1 });
 
     await expect(
-      addRecipesToCollection('collection-uuid', { recipes: [{ recipeId: 'recipe-uuid', order: 0 }] }),
+      addRecipesToCollection('collection-uuid', {
+        recipes: [{ recipeId: 'recipe-uuid', order: 0 }],
+      }),
     ).rejects.toMatchObject({ statusCode: 404, code: 'COLLECTION_NOT_FOUND' });
   });
 });
@@ -377,7 +547,9 @@ describe('followCollection()', () => {
     await followCollection('collection-uuid', 'user_other');
 
     expect(prisma.collectionFollower.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ collectionId: 'collection-uuid' }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ collectionId: 'collection-uuid' }),
+      }),
     );
   });
 

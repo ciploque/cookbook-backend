@@ -9,10 +9,13 @@ import {
   UpdateCollectionInput,
 } from './collection.schema';
 
-export async function listPublicCollectionsByUser(req: Request, res: Response): Promise<void> {
-  const result = await collectionService.listPublicCollectionsByUser(
+export async function listCollectionsByUser(req: Request, res: Response): Promise<void> {
+  // req.user is populated by optionalAuthenticate — undefined for an anonymous caller, in
+  // which case the service returns public collections only.
+  const result = await collectionService.listCollectionsByUser(
     req.params.userId as string,
     req.query as unknown as CollectionQuery,
+    req.user?.sub,
   );
   res.json({ success: true, ...result });
 }

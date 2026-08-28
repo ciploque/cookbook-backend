@@ -37,7 +37,7 @@ vi.mock('../../../src/modules/reviews/review.service', () => ({
 vi.mock('../../../src/modules/collections/collection.service', () => ({
   getOwnerId: vi.fn(async () => 'dev-user'),
   getCollectionById: vi.fn(async () => ({ id: 'ok' })),
-  listPublicCollectionsByUser: vi.fn(async () => ({ data: [], meta: {} })),
+  listCollectionsByUser: vi.fn(async () => ({ data: [], meta: {} })),
   listMyCollections: vi.fn(async () => ({ data: [], meta: {} })),
   followCollection: vi.fn(async () => undefined),
 }));
@@ -63,6 +63,7 @@ import { recipeReportsRouter } from '../../../src/modules/reports/report.router'
 import { errorHandler } from '../../../src/middlewares/errorHandler';
 import * as recipeService from '../../../src/modules/recipes/recipe.service';
 import * as userService from '../../../src/modules/users/user.service';
+import * as collectionService from '../../../src/modules/collections/collection.service';
 
 // Mirrors the mount order in app.ts.
 function buildApp(): Express {
@@ -144,7 +145,9 @@ describe('malformed uuid route params are rejected with 422', () => {
   }
 
   it('rejects before the owner guard reaches the database', async () => {
-    await api().delete(`/recipes/${BAD}`).set(...AUTH);
+    await api()
+      .delete(`/recipes/${BAD}`)
+      .set(...AUTH);
     // The guard resolves the owner via Prisma — a malformed uuid must never get that far.
     expect(recipeService.getRecipeAuthorId).not.toHaveBeenCalled();
   });
@@ -194,7 +197,11 @@ describe('well-formed uuid params still reach the handler', () => {
   it('GET /users/:userId/recipes forwards undefined when no session is present', async () => {
     const res = await api().get(`/users/${UUID}/recipes`);
     expect(res.status).toBe(200);
-    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(UUID, expect.anything(), undefined);
+    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(
+      UUID,
+      expect.anything(),
+      undefined,
+    );
   });
 
   it('GET /users/:userId/recipes forwards the caller sub when a session is present', async () => {
@@ -202,7 +209,47 @@ describe('well-formed uuid params still reach the handler', () => {
       .get(`/users/${UUID}/recipes`)
       .set(...AUTH);
     expect(res.status).toBe(200);
-    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(UUID, expect.anything(), 'dev-user');
+    expect(recipeService.listRecipesByUser).toHaveBeenCalledWith(
+      UUID,
+      expect.anything(),
+      'dev-user',
+    );
+  });
+
+  it('GET /users/:userId forwards undefined when no session is present', async () => {
+    const res = await api().get(`/users/${UUID}`);
+    expect(res.status).toBe(200);
+    expect(userService.getUserById).toHaveBeenCalledWith(UUID, undefined);
+  });
+
+  it('GET /users/:userId forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get(`/users/${UUID}`)
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(userService.getUserById).toHaveBeenCalledWith(UUID, 'dev-user');
+  });
+
+  it('GET /users/:userId/collections forwards undefined when no session is present', async () => {
+    const res = await api().get(`/users/${UUID}/collections`);
+    expect(res.status).toBe(200);
+    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
+      UUID,
+      expect.anything(),
+      undefined,
+    );
+  });
+
+  it('GET /users/:userId/collections forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get(`/users/${UUID}/collections`)
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
+      UUID,
+      expect.anything(),
+      'dev-user',
+    );
   });
 });
 
@@ -224,6 +271,16 @@ describe('non-uuid routes are unaffected', () => {
   it('GET /users/username/:username is not shadowed by the /:userId uuid guard', async () => {
     const res = await api().get('/users/username/joao');
     expect(res.status).toBe(200);
+    // optionalAuthenticate runs here too — an anonymous caller resolves rather than 401ing.
+    expect(userService.getUserByUsername).toHaveBeenCalledWith('joao', undefined);
+  });
+
+  it('GET /users/username/:username forwards the caller sub when a session is present', async () => {
+    const res = await api()
+      .get('/users/username/joao')
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(userService.getUserByUsername).toHaveBeenCalledWith('joao', 'dev-user');
   });
 
   it('GET /users/me/collections is not swallowed by the :userId uuid guard', async () => {

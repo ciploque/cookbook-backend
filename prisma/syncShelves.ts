@@ -12,7 +12,9 @@ async function main() {
 
   console.log(`Shelves synced: ${created} created, ${updated} updated.`);
   if (deleted.length > 0) {
-    console.log(`Removed ${deleted.length} shelf/shelves absent from config: ${deleted.join(', ')}`);
+    console.log(
+      `Removed ${deleted.length} shelf/shelves absent from config: ${deleted.join(', ')}`,
+    );
   }
 
   console.log('\nRefreshing contents…');

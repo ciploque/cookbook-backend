@@ -9,8 +9,8 @@ import {
   deleteCollection,
   followCollection,
   getCollectionById,
+  listCollectionsByUser,
   listMyCollections,
-  listPublicCollectionsByUser,
   patchCollection,
   removeRecipesFromCollection,
   unfollowCollection,
@@ -121,11 +121,14 @@ userCollectionsRouter.get(
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listMyCollections),
 );
+// Public — optionalAuthenticate lets the owner see their own private collections here too,
+// without rejecting anonymous callers.
 userCollectionsRouter.get(
   '/:userId/collections',
   validate(userCollectionsParamsSchema, 'params'),
+  optionalAuthenticate,
   validate(collectionQuerySchema, 'query'),
-  asyncHandler(listPublicCollectionsByUser),
+  asyncHandler(listCollectionsByUser),
 );
 
 export default router;

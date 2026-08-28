@@ -331,9 +331,9 @@ describe('syncShelvesFromConfig', () => {
   });
 
   it('rejects duplicate slugs in the config', async () => {
-    await expect(
-      syncShelvesFromConfig([validDefinition, { ...validDefinition }]),
-    ).rejects.toThrow(/Duplicate shelf slug/);
+    await expect(syncShelvesFromConfig([validDefinition, { ...validDefinition }])).rejects.toThrow(
+      /Duplicate shelf slug/,
+    );
 
     expect(prisma.shelf.upsert).not.toHaveBeenCalled();
   });

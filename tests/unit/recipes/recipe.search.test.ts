@@ -103,10 +103,7 @@ describe('index sync failures are swallowed, not propagated', () => {
       // Let the rejected promise settle — an unhandled rejection here would fail the run.
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining(name),
-        expect.any(Error),
-      );
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining(name), expect.any(Error));
       consoleError.mockRestore();
     });
   }
@@ -118,7 +115,13 @@ describe('searchRecipesViaMeili() — page and limit', () => {
   it('passes page=1 and hitsPerPage=20 for page=1, limit=20', async () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
-    await searchRecipesViaMeili({ q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' });
+    await searchRecipesViaMeili({
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+    });
 
     expect(mockSearch).toHaveBeenCalledWith(
       'pasta',
@@ -129,7 +132,13 @@ describe('searchRecipesViaMeili() — page and limit', () => {
   it('passes page=2 and hitsPerPage=20 for page=2, limit=20', async () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
-    await searchRecipesViaMeili({ q: 'pasta', page: 2, limit: 20, sortBy: 'createdAt', order: 'desc' });
+    await searchRecipesViaMeili({
+      q: 'pasta',
+      page: 2,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+    });
 
     expect(mockSearch).toHaveBeenCalledWith(
       'pasta',
@@ -141,7 +150,11 @@ describe('searchRecipesViaMeili() — page and limit', () => {
     mockSearch.mockResolvedValue({ hits: [baseHit], totalHits: 55 });
 
     const result = await searchRecipesViaMeili({
-      q: 'pasta', page: 2, limit: 10, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 2,
+      limit: 10,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     expect(result.meta).toMatchObject({
@@ -158,7 +171,11 @@ describe('searchRecipesViaMeili() — page and limit', () => {
     mockSearch.mockResolvedValue({ hits: [baseHit], totalHits: 20 });
 
     const result = await searchRecipesViaMeili({
-      q: 'pasta', page: 2, limit: 10, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 2,
+      limit: 10,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     expect(result.meta).toMatchObject({ hasNextPage: false, hasPrevPage: true });
@@ -168,7 +185,11 @@ describe('searchRecipesViaMeili() — page and limit', () => {
     mockSearch.mockResolvedValue({ hits: [baseHit], totalHits: 50 });
 
     const result = await searchRecipesViaMeili({
-      q: 'pasta', page: 1, limit: 10, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 1,
+      limit: 10,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     expect(result.meta).toMatchObject({ hasNextPage: true, hasPrevPage: false });
@@ -182,7 +203,11 @@ describe('searchRecipesViaMeili() — page and limit', () => {
     });
 
     const result = await searchRecipesViaMeili({
-      q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
     });
 
     expect(result.data[0].description).toHaveLength(200);
@@ -194,7 +219,11 @@ describe('searchRecipesViaMeili() — filter string escaping', () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
     await searchRecipesViaMeili({
-      q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
       category: 'cooking" OR authorId != "00000000',
     });
 
@@ -211,7 +240,11 @@ describe('searchRecipesViaMeili() — filter string escaping', () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
     await searchRecipesViaMeili({
-      q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc',
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
       tags: 'italian" OR 1=1,pasta',
     });
 
@@ -231,7 +264,12 @@ describe('searchRecipesViaMeili() — minRating filter', () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
     await searchRecipesViaMeili({
-      q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc', minRating: 4,
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+      minRating: 4,
     });
 
     expect(mockSearch).toHaveBeenCalledWith(
@@ -243,9 +281,18 @@ describe('searchRecipesViaMeili() — minRating filter', () => {
   it('omits the averageRating filter when minRating is not provided', async () => {
     mockSearch.mockResolvedValue({ hits: [], totalHits: 0 });
 
-    await searchRecipesViaMeili({ q: 'pasta', page: 1, limit: 20, sortBy: 'createdAt', order: 'desc' });
+    await searchRecipesViaMeili({
+      q: 'pasta',
+      page: 1,
+      limit: 20,
+      sortBy: 'createdAt',
+      order: 'desc',
+    });
 
-    expect(mockSearch).toHaveBeenCalledWith('pasta', expect.objectContaining({ filter: undefined }));
+    expect(mockSearch).toHaveBeenCalledWith(
+      'pasta',
+      expect.objectContaining({ filter: undefined }),
+    );
   });
 });
 
