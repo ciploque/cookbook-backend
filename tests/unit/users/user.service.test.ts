@@ -79,7 +79,12 @@ describe('provisionUser()', () => {
     expect(result.created).toBe(true);
     expect(result.user).toEqual(mockUser);
     expect(prisma.user.create).toHaveBeenCalledWith({
-      data: { authProviderId: 'user_abc', username: 'joao', displayName: 'João', avatarUrl: undefined },
+      data: {
+        authProviderId: 'user_abc',
+        username: 'joao',
+        displayName: 'João',
+        avatarUrl: undefined,
+      },
     });
   });
 
@@ -97,8 +102,9 @@ describe('provisionUser()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
     vi.mocked(prisma.user.create).mockRejectedValue(p2002OnUsername);
 
-    await expect(provisionUser('user_new', { username: 'taken', displayName: 'New' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    await expect(
+      provisionUser('user_new', { username: 'taken', displayName: 'New' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 
   it('returns the winning row when a create races on authProviderId (concurrent first login)', async () => {
@@ -113,13 +119,12 @@ describe('provisionUser()', () => {
   });
 
   it('throws CONFLICT when the authProviderId race re-fetch unexpectedly finds nothing', async () => {
-    vi.mocked(prisma.user.findUnique)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null);
+    vi.mocked(prisma.user.findUnique).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     vi.mocked(prisma.user.create).mockRejectedValue(p2002OnAuthProviderId);
 
-    await expect(provisionUser('user_abc', { username: 'joao', displayName: 'João' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    await expect(
+      provisionUser('user_abc', { username: 'joao', displayName: 'João' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
   });
 
   it('re-throws unexpected errors from prisma.user.create', async () => {
@@ -127,8 +132,9 @@ describe('provisionUser()', () => {
     const unexpectedError = new Error('DB connection lost');
     vi.mocked(prisma.user.create).mockRejectedValue(unexpectedError);
 
-    await expect(provisionUser('user_new', { username: 'user', displayName: 'New' }))
-      .rejects.toThrow('DB connection lost');
+    await expect(
+      provisionUser('user_new', { username: 'user', displayName: 'New' }),
+    ).rejects.toThrow('DB connection lost');
   });
 });
 
@@ -147,7 +153,10 @@ describe('getMe()', () => {
   it('throws USER_NOT_FOUND (404) when user does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(getMe('user_missing')).rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
+    await expect(getMe('user_missing')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'USER_NOT_FOUND',
+    });
   });
 });
 
@@ -157,8 +166,10 @@ describe('updateMe()', () => {
   it('throws USER_NOT_FOUND when user does not exist', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
 
-    await expect(updateMe('user_missing', { displayName: 'New Name' }))
-      .rejects.toMatchObject({ statusCode: 404, code: 'USER_NOT_FOUND' });
+    await expect(updateMe('user_missing', { displayName: 'New Name' })).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'USER_NOT_FOUND',
+    });
 
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
@@ -210,22 +221,70 @@ describe('updateMe()', () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
     vi.mocked(prisma.user.update).mockRejectedValue(p2002);
 
-    await expect(updateMe('user_abc', { username: 'taken' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    await expect(updateMe('user_abc', { username: 'taken' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+    });
   });
 });
 
-// ─── getUserById ─────────────────────────────────────────────────────────────
+// ─── getUserById / getUserByUsername (public profile + counts) ───────────────
+
+// The public getters fetch through `include: { _count: ... }`, so the mocked row carries the
+// counts the way Prisma would return them.
+const mockUserWithCounts = { ...mockUser, _count: { recipes: 42, collections: 7 } };
+
+// The `collections` count filter as the service builds it for each kind of caller.
+const PUBLIC_ONLY = { isPublic: true };
+const ownerVisible = (sub: string) => ({
+  OR: [{ isPublic: true }, { owner: { authProviderId: sub } }],
+});
+
+const countInclude = (collectionsWhere: unknown) => ({
+  _count: { select: { recipes: true, collections: { where: collectionsWhere } } },
+});
 
 describe('getUserById()', () => {
   it('returns the user without authProviderId (public field)', async () => {
-    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
 
     const result = await getUserById('user-uuid-1');
 
     expect(result).not.toHaveProperty('authProviderId');
+    expect(result).not.toHaveProperty('_count');
     expect(result).toHaveProperty('id', 'user-uuid-1');
     expect(result).toHaveProperty('username', 'joao');
+  });
+
+  it('surfaces recipeCount and collectionCount from the relation counts', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    const result = await getUserById('user-uuid-1');
+
+    expect(result.recipeCount).toBe(42);
+    expect(result.collectionCount).toBe(7);
+  });
+
+  it('counts public collections only for an anonymous caller', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    await getUserById('user-uuid-1');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 'user-uuid-1' },
+      include: countInclude(PUBLIC_ONLY),
+    });
+  });
+
+  it('counts private collections too when the caller is the profile owner', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    await getUserById('user-uuid-1', 'user_abc');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 'user-uuid-1' },
+      include: countInclude(ownerVisible('user_abc')),
+    });
   });
 
   it('throws USER_NOT_FOUND (404) when user does not exist', async () => {
@@ -238,18 +297,54 @@ describe('getUserById()', () => {
   });
 });
 
-// ─── getUserByUsername ───────────────────────────────────────────────────────
-
 describe('getUserByUsername()', () => {
   it('returns the user without authProviderId (public field)', async () => {
-    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUser);
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
 
     const result = await getUserByUsername('joao');
 
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { username: 'joao' } });
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { username: 'joao' },
+      include: countInclude(PUBLIC_ONLY),
+    });
     expect(result).not.toHaveProperty('authProviderId');
+    expect(result).not.toHaveProperty('_count');
     expect(result).toHaveProperty('id', 'user-uuid-1');
     expect(result).toHaveProperty('username', 'joao');
+  });
+
+  it('surfaces recipeCount and collectionCount from the relation counts', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    const result = await getUserByUsername('joao');
+
+    expect(result.recipeCount).toBe(42);
+    expect(result.collectionCount).toBe(7);
+  });
+
+  it('counts private collections too when the caller is the profile owner', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    await getUserByUsername('joao', 'user_abc');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { username: 'joao' },
+      include: countInclude(ownerVisible('user_abc')),
+    });
+  });
+
+  // Being signed in isn't enough — only being *this* profile's user widens the count. The
+  // filter is identical for a stranger and the owner alike; it's the OR clause that can only
+  // match rows owned by the caller, so a different sub simply never matches.
+  it('builds the same owner-OR filter for a signed-in stranger (no row can match it)', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockUserWithCounts);
+
+    await getUserByUsername('joao', 'user_someone_else');
+
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { username: 'joao' },
+      include: countInclude(ownerVisible('user_someone_else')),
+    });
   });
 
   it('throws USER_NOT_FOUND (404) when username does not exist', async () => {
@@ -342,13 +437,16 @@ describe('provisionFromWebhook()', () => {
 
   it('retries with a random suffix on a username collision, then succeeds', async () => {
     vi.mocked(prisma.user.findUnique).mockResolvedValue(null);
-    vi.mocked(prisma.user.create).mockRejectedValueOnce(p2002OnUsername).mockResolvedValueOnce(mockUser);
+    vi.mocked(prisma.user.create)
+      .mockRejectedValueOnce(p2002OnUsername)
+      .mockResolvedValueOnce(mockUser);
 
     const result = await provisionFromWebhook(clerkUser);
 
     expect(result.created).toBe(true);
     expect(prisma.user.create).toHaveBeenCalledTimes(2);
-    const secondCallUsername = vi.mocked(prisma.user.create).mock.calls[1][0].data.username as string;
+    const secondCallUsername = vi.mocked(prisma.user.create).mock.calls[1][0].data
+      .username as string;
     expect(secondCallUsername).toMatch(/^joaolima-[a-f0-9]{4}$/);
   });
 

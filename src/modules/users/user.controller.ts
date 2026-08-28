@@ -21,11 +21,12 @@ export async function updateMe(req: Request, res: Response): Promise<void> {
 }
 
 export async function getUserById(req: Request, res: Response): Promise<void> {
-  const user = await userService.getUserById(req.params.userId as string);
+  // req.user is populated by optionalAuthenticate — undefined for an anonymous caller.
+  const user = await userService.getUserById(req.params.userId as string, req.user?.sub);
   res.json({ success: true, data: user });
 }
 
 export async function getUserByUsername(req: Request, res: Response): Promise<void> {
-  const user = await userService.getUserByUsername(req.params.username as string);
+  const user = await userService.getUserByUsername(req.params.username as string, req.user?.sub);
   res.json({ success: true, data: user });
 }

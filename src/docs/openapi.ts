@@ -59,6 +59,10 @@ const PublicUserSchema = registry.register(
     bio: z.string().nullable(),
     about: z.string().nullable(),
     avatarUrl: z.string().nullable(),
+    // Total recipes authored. Unfiltered — Recipe has no visibility flag.
+    recipeCount: z.number().int(),
+    // Public collections only, unless the caller is this user — then private ones count too.
+    collectionCount: z.number().int(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   }),
@@ -253,6 +257,11 @@ const CollectionSchema = registry.register(
     isPublic: z.boolean(),
     owner: CollectionOwnerSchema,
     recipes: z.array(CollectionRecipeItemSchema),
+    // Card thumbnails: covers of the first 4 recipes by `order`. Recipes without a cover are
+    // omitted rather than backfilled, so this holds 0–4 entries and never a null.
+    coverImages: z.array(z.string()),
+    // Total membership — unaffected by the 50-recipe cap on `recipes`.
+    recipeCount: z.number().int(),
     followerCount: z.number().int(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -420,6 +429,10 @@ registry.registerPath({
   path: '/api/v1/users/{userId}',
   tags: ['Users'],
   summary: 'Get public user profile',
+  description:
+    'Auth is optional. Anonymous callers are served normally; a valid session belonging to this ' +
+    'same user makes `collectionCount` include their private collections.',
+  security: [{ bearerAuth: [] }, {}],
   request: {
     params: z.object({ userId: z.string().uuid() }),
   },
@@ -449,7 +462,10 @@ registry.registerPath({
   tags: ['Users'],
   summary: 'Get public user profile by username',
   description:
-    'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route.',
+    'Human-friendly lookup by username, alongside the DB-id-based /users/{userId} route. ' +
+    'Auth is optional: a valid session belonging to this same user makes `collectionCount` ' +
+    'include their private collections.',
+  security: [{ bearerAuth: [] }, {}],
   request: {
     params: z.object({ username: z.string() }),
   },
@@ -1232,14 +1248,20 @@ registry.registerPath({
   method: 'get',
   path: '/api/v1/users/{userId}/collections',
   tags: ['Collections'],
-  summary: "List a user's public collections",
+  summary: "List a user's collections",
+  description:
+    'Public collections only. Auth is optional: a valid session belonging to this same user ' +
+    'returns their private collections as well.',
+  security: [{ bearerAuth: [] }, {}],
   request: {
     params: z.object({ userId: z.string().uuid() }),
     query: collectionQuerySchema,
   },
   responses: {
     200: {
-      description: 'Paginated list of public collections',
+      description:
+        "Paginated list of the user's public collections — plus their private ones when the " +
+        'caller is that user',
       content: {
         'application/json': {
           schema: z.object({

@@ -13,6 +13,10 @@ import {
 // Collection detail shows only the first 50 recipes — see CLAUDE.md Collections section.
 const MAX_INLINE_COLLECTION_RECIPES = 50;
 
+// Cover thumbnails for a collection card: the first 4 recipes by `order`, minus any without a
+// cover. Deliberately not backfilled from later recipes — position is what's meaningful here.
+const COLLECTION_COVER_IMAGE_COUNT = 4;
+
 const collectionInclude = {
   owner: {
     select: { id: true, username: true, displayName: true, avatarUrl: true, authProviderId: true },
@@ -24,7 +28,8 @@ const collectionInclude = {
       recipe: { select: { id: true, slug: true, title: true, coverImageUrl: true } },
     },
   },
-  _count: { select: { followers: true } },
+  // `recipes` counts the whole membership, not the `take`-capped array above.
+  _count: { select: { followers: true, recipes: true } },
 } satisfies Prisma.CollectionInclude;
 
 function formatCollection(
@@ -33,9 +38,21 @@ function formatCollection(
   const {
     _count,
     owner: { authProviderId: _ownerKey, ...ownerPublic },
+    recipes,
     ...rest
   } = collection;
-  return { ...rest, owner: ownerPublic, followerCount: _count.followers };
+
+  return {
+    ...rest,
+    recipes,
+    owner: ownerPublic,
+    coverImages: recipes
+      .slice(0, COLLECTION_COVER_IMAGE_COUNT)
+      .map((entry) => entry.recipe.coverImageUrl)
+      .filter((url): url is string => url !== null),
+    recipeCount: _count.recipes,
+    followerCount: _count.followers,
+  };
 }
 
 async function paginateCollections(
@@ -62,14 +79,26 @@ async function paginateCollections(
   };
 }
 
-export async function listPublicCollectionsByUser(userId: string, query: CollectionQuery) {
+// Public-only for a visitor, but the full set when the caller *is* the user being listed —
+// so a profile page reached by id shows its owner the same collections /users/me/collections does.
+export async function listCollectionsByUser(
+  userId: string,
+  query: CollectionQuery,
+  viewerAuthProviderId?: string,
+) {
   const targetUser = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true },
+    select: { id: true, authProviderId: true },
   });
   if (!targetUser) throw ApiError.notFound('User');
 
-  return paginateCollections({ ownerId: userId, isPublic: true }, query.page, query.limit);
+  const isOwner = !!viewerAuthProviderId && viewerAuthProviderId === targetUser.authProviderId;
+
+  return paginateCollections(
+    { ownerId: userId, ...(isOwner ? {} : { isPublic: true }) },
+    query.page,
+    query.limit,
+  );
 }
 
 export async function listMyCollections(authProviderId: string, query: CollectionQuery) {

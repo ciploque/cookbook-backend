@@ -136,16 +136,24 @@ cookbook-backend/
 │   │   ├── utils/
 │   │   │   ├── ApiError.test.ts
 │   │   │   ├── slugify.test.ts
-│   │   │   └── pagination.test.ts
+│   │   │   ├── pagination.test.ts
+│   │   │   ├── imageSignature.test.ts
+│   │   │   ├── imageUrl.test.ts
+│   │   │   └── videoUrl.test.ts
 │   │   ├── users/
 │   │   │   └── user.service.test.ts
 │   │   ├── recipes/
-│   │   │   └── recipe.service.test.ts
+│   │   │   ├── recipe.service.test.ts
+│   │   │   ├── recipe.controller.test.ts   # HTTP contract: real routers, service mocked
+│   │   │   ├── recipe.schema.test.ts
+│   │   │   └── recipe.search.test.ts
 │   │   ├── reviews/
 │   │   │   ├── review.service.test.ts
+│   │   │   ├── review.controller.test.ts
 │   │   │   └── review.schema.test.ts
 │   │   ├── collections/
-│   │   │   └── collection.service.test.ts
+│   │   │   ├── collection.service.test.ts
+│   │   │   └── collection.controller.test.ts
 │   │   ├── reports/
 │   │   │   ├── report.service.test.ts
 │   │   │   └── report.schema.test.ts
@@ -156,12 +164,24 @@ cookbook-backend/
 │   │   │   ├── shelf.service.test.ts
 │   │   │   ├── shelf.schema.test.ts
 │   │   │   └── resolvers.test.ts
+│   │   ├── storage/
+│   │   │   └── storage.service.test.ts
+│   │   ├── tags/
+│   │   │   └── tag.service.test.ts
 │   │   ├── webhooks/
 │   │   │   └── clerk.webhook.controller.test.ts
+│   │   ├── config/
+│   │   │   └── envGuards.test.ts
+│   │   ├── docs/
+│   │   │   └── openapi.test.ts   # asserts every Express route has an OpenAPI entry
 │   │   ├── routers/
 │   │   │   └── paramsValidation.test.ts  # mounts the real routers; asserts 422 on every uuid param route
 │   │   └── middlewares/
 │   │       ├── authenticate.test.ts
+│   │       ├── authorize.test.ts
+│   │       ├── validate.test.ts
+│   │       ├── errorHandler.test.ts
+│   │       ├── upload.test.ts
 │   │       └── verifyClerkWebhook.test.ts
 │   ├── integration/            # Pending — use real DB + supertest
 │   └── helpers/
@@ -173,6 +193,7 @@ cookbook-backend/
 ├── .env.example
 ├── eslint.config.js
 ├── .prettierrc
+├── .prettierignore             # excludes *.md — see the Formatting note under Development Commands
 ├── tsconfig.json
 ├── vitest.config.ts
 └── package.json
@@ -258,6 +279,9 @@ Routes using it:
 | `GET /users/:username/recipes/:recipename` | Same flags as above — identical detail shape |
 | `GET /recipes` | Adds an accurate per-item `isSavedInCollection` flag (batched, one query for the whole page) |
 | `GET /users/:userId/recipes` | Same as above — delegates to the same `listRecipes()` |
+| `GET /users/:userId` | The profile's own owner sees their private collections counted in `collectionCount` |
+| `GET /users/username/:username` | Same as above — identical profile shape |
+| `GET /users/:userId/collections` | The owner gets their private collections in the list, not just the public ones |
 
 Do not reach for `req.user?.sub` on a route that hasn't run either `authenticate` or `optionalAuthenticate` — `req.user` is never populated by `clerkMiddleware()` alone, only by one of these two.
 
@@ -373,8 +397,10 @@ All responses use a consistent shape:
 | POST | `/users/me` | Required | Provision user profile (idempotent) |
 | GET | `/users/me` | Required | Get own profile |
 | PUT | `/users/me` | Required | Update own profile |
-| GET | `/users/:userId` | Public | Get public user profile by DB id |
-| GET | `/users/username/:username` | Public | Get public user profile by username (pretty-URL alternative to the above; same response shape) |
+| GET | `/users/:userId` | Public* | Get public user profile by DB id |
+| GET | `/users/username/:username` | Public* | Get public user profile by username (pretty-URL alternative to the above; same response shape) |
+
+*Both public profile GETs run `optionalAuthenticate`, not `authenticate` — anonymous requests are served normally, but a session belonging to the profile's own user makes `collectionCount` include their private collections. See [Public Profile Counts](#public-profile-counts) below and [Optional Auth](#optional-auth-optionalauthenticate).
 
 #### POST /users/me
 
@@ -423,7 +449,33 @@ Creates a `User` row using `req.user.sub` as `authProviderId`. If a row already 
 }
 ```
 
-**Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses.
+**Note:** `authProviderId` is omitted from the public `GET /users/:userId` / `GET /users/username/:username` responses, which instead add the two count fields below.
+
+#### Public Profile Counts
+
+The two public profile GETs return two extra fields the authenticated `/users/me` routes do not:
+
+```json
+{ "recipeCount": 42, "collectionCount": 7 }
+```
+
+They're on the public shape only — `POST`/`GET`/`PUT /users/me` return the raw user row without
+them, since a profile page is the only surface that needs the totals and `/users/me` callers can
+page the list endpoints directly.
+
+**`recipeCount`** is the user's total authored recipes, the same number for every caller:
+`Recipe` has no visibility flag, so there is no private subset to hide.
+
+**`collectionCount`** is viewer-scoped, the way `isSavedInCollection` is on recipes: it counts
+**public collections only**, unless the caller *is* the profile's user — then their private
+collections are counted too, so the number agrees with what `GET /users/me/collections` returns
+them. Signing in as somebody else changes nothing; only being the profile owner does.
+
+Both resolve as Prisma `_count` selects inside the single `findUnique` that already fetches the
+user — no extra round trip. The owner check rides along in the count's own `where` rather than
+branching after the fetch: the counted rows already belong to the profile user, so
+`OR: [{ isPublic: true }, { owner: { authProviderId: <caller> } }]` is true for the private ones
+exactly when the caller is that user (`collectionCountFilter` in `user.service.ts`).
 
 **`bio` vs `about`:** two independent optional fields, both update-only (neither is accepted by
 `POST /users/me` — provisioning takes `username`/`displayName`/`avatarUrl`, and the rest is
@@ -919,7 +971,7 @@ reports a recipe can never report it again.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/users/:userId/collections` | Public | List a user's public collections |
+| GET | `/users/:userId/collections` | Public* | List a user's public collections — plus their private ones when the caller is that user |
 | GET | `/users/me/collections` | Required | List all (public + private) collections owned by the authenticated user |
 | GET | `/collections/:collectionId` | Public* | Get single collection with ordered recipes (first 50 only — see note below) |
 | POST | `/collections` | Required | Create collection (metadata only) |
@@ -931,11 +983,13 @@ reports a recipe can never report it again.
 | POST | `/collections/:collectionId/follow` | Required, not owner | Follow public collection |
 | DELETE | `/collections/:collectionId/follow` | Required | Unfollow |
 
-*Private collections: 404 when a non-owner accesses `GET /collections/:collectionId` directly. That route runs `optionalAuthenticate` (not `authenticate`) so an owner's own valid session is recognized without rejecting anonymous requests — see [Optional Auth](#optional-auth-optionalauthenticate). `GET /users/:userId/collections` and `GET /users/me/collections` are deliberately separate endpoints instead of one auth-dependent route: the former is unconditionally public-only (no auth involved at all), the latter requires a valid session and always returns the full set for that session's own user — see the note on `userCollectionsRouter` route registration order below.
+*Private collections: 404 when a non-owner accesses `GET /collections/:collectionId` directly. That route runs `optionalAuthenticate` (not `authenticate`) so an owner's own valid session is recognized without rejecting anonymous requests — see [Optional Auth](#optional-auth-optionalauthenticate). `GET /users/:userId/collections` runs `optionalAuthenticate` for the same reason: it returns public collections to anyone, and the full set (public + private) when the caller's session belongs to the user being listed — matching the `collectionCount` rule in [Public Profile Counts](#public-profile-counts), so a profile page's number and list never disagree.
+
+`GET /users/:userId/collections` and `GET /users/me/collections` remain deliberately separate endpoints rather than one route: the `/me` form needs no id at all and always means "the caller's own", so it requires a valid session and is the natural call for a signed-in user's own library, while the id form is how *anyone* addresses a specific user's profile. Both now return the same set when the caller is that user — see the note on `userCollectionsRouter` route registration order below.
 
 **Route registration order:** `GET /users/me/collections` is registered **before** `GET /users/:userId/collections` in `userCollectionsRouter` (`collection.router.ts`) so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`.
 
-**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them.
+**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
 
 #### POST /collections — Request Body
 
@@ -977,11 +1031,26 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
   "recipes": [
     { "collectionId": "uuid", "recipeId": "uuid", "order": 0, "recipe": { "id": "uuid", "slug": "string", "title": "string", "coverImageUrl": "string | null" } }
   ],
+  "coverImages": ["/recipes/<id>/cover/<uuid>.jpg"],
+  "recipeCount": 12,
   "followerCount": 5,
   "createdAt": "ISO8601",
   "updatedAt": "ISO8601"
 }
 ```
+
+**`coverImages`** is a card-preview convenience: the covers of the **first 4 recipes by `order`**
+(the same ordering `recipes` uses — `CollectionRecipe` has no `createdAt`, so `order` is the only
+ordering available). A recipe among those 4 with no cover is simply **omitted — never backfilled**
+from the 5th onward, so the array holds 0–4 entries and its length carries no information about
+`recipeCount`. Entries are `string`, never `null`, and are the same relative leading-slash paths
+as `coverImageUrl` everywhere else — the frontend prepends its own base/CDN URL (see
+[Cloudflare R2 Image Storage](#cloudflare-r2-image-storage)).
+
+**`recipeCount`** is the collection's **true** total membership, resolved as a Prisma `_count`
+over `CollectionRecipe` in the same query — deliberately not `recipes.length`, which is capped at
+50 (see the note above). Both fields are on the shared `Collection` shape, so every collection
+response carries them, not just the list endpoints.
 
 **Follow constraints:** Only public collections can be followed. Authors cannot follow their own collections. A `409 CONFLICT` is returned if already following.
 
@@ -1617,7 +1686,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (508 passing)
+### Unit Tests (541 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1626,8 +1695,9 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/utils/ApiError.test.ts` | 12 | All static factory methods, prototype chain, code/statusCode mapping, multi-word (2 and 3+) resource names in `notFound()` |
 | `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
-| `tests/unit/users/user.service.test.ts` | 30 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById, provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 65 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
+| `tests/unit/users/user.service.test.ts` | 36 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe, updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById/getUserByUsername (`authProviderId` **and** `_count` stripped, `recipeCount`/`collectionCount` surfaced from the relation counts, collection count filter is `{ isPublic: true }` for an anonymous caller and the owner-`OR` form for a signed-in one, not found), provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
+| `tests/unit/recipes/recipe.service.test.ts` | 70 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
+| `tests/unit/recipes/recipe.controller.test.ts` | 21 | Real recipe routers on a bare Express app, service mocked — pins the HTTP contract: the `{ success, data }` / `{ success, data, meta }` envelope with `meta` beside `data` (not nested), query defaults coerced (`minRating` a number, not `"4"`), a service 404 surfacing as the error envelope rather than a 500, `201` on create with the author taken from the session (never the body), `coverImageUrl`/`imageUrls` stripped from a create body, `401` before the service on an unauthenticated create, `403` before the service when the caller is not the author, `204` with an empty body on delete, and the image routes (buffers forwarded in order, `422` with a field-level message when no file is attached) |
 | `tests/unit/recipes/recipe.schema.test.ts` | 11 | `categories` lowercased/trimmed per slug on write, defaults to `[]`, capped at 5, rejects empty slugs; `category` filter still lowercased/trimmed (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs; `videoUrl` host allowlist; `authorNote` cap |
 | `tests/unit/recipes/recipe.search.test.ts` | 18 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping (page/hitsPerPage, exact `totalHits`), `minRating` filter clause, filter string escaping for the `categories`/tag slug clauses, `updateIndexedRecipeRating` partial document sync |
 | `tests/unit/categories/category.service.test.ts` | 9 | `listCategories` (flattens `_count` into `recipeCount`, keeps zero-count categories, orders by name, empty registry); `resolveCategories` (empty input short-circuits with no query, de-duplicates into one `findMany`, unknown slugs → 422 naming every one of them); `syncCategoriesFromConfig` (created vs updated counts, reports extras **without deleting**, rejects a malformed definition / duplicate slug / duplicate name before any write) |
@@ -1635,11 +1705,14 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/storage/storage.service.test.ts` | 6 | `storeImage` (returns leading-slash path, uploads to R2 with the unprefixed key, invalid content rejected via `ApiError.validation`), `deleteImage` (strips leading slash before the R2 call), `buildImageUrl` |
 | `tests/unit/utils/imageSignature.test.ts` | 9 | `detectImageType` magic-byte detection for JPEG/PNG/WEBP/GIF; rejects unknown content and SVG |
 | `tests/unit/utils/imageUrl.test.ts` | 8 | `trustedImageUrlSchema` — allows any URL when no allowlist configured, rejects non-URLs, accepts/rejects by hostname against `TRUSTED_IMAGE_DOMAINS` |
+| `tests/unit/utils/videoUrl.test.ts` | 17 | `trustedVideoUrlSchema` — accepts each of the 10 allowlisted video hosts (YouTube incl. `youtu.be`/`youtube-nocookie.com`, Vimeo incl. `player.vimeo.com`, TikTok, Instagram, Facebook incl. `fb.watch`, Loom); rejects non-URLs, `http:` even for an allowed host, `javascript:`, a disallowed host, and the three classic allowlist bypasses — userinfo (`https://youtube.com@evil.com/`), lookalike prefix (`evilyoutube.com`), and suffix (`youtube.com.evil.com`) |
 | `tests/unit/tags/tag.service.test.ts` | 3 | `upsertTags` — empty input short-circuits, single `createMany`+`findMany` round-trip regardless of tag count, de-duplicates names that slugify to the same value |
 | `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
+| `tests/unit/reviews/review.controller.test.ts` | 18 | Real review routers on a bare Express app, service mocked — the paginated envelope, `filter`/`order` forwarded and an unsupported `filter` rejected with 422, `GET /recipes/:recipeId/reviews/summary` not shadowed by the list route, `GET …/reviews/me` resolving the caller from the session and requiring auth (unlike its two sibling reads), `201` on create with the author from the session, a client-supplied `imageUrls` stripped, the duplicate-review conflict surfacing as 409, `recipeId` stripped from a `PUT` body so a review can't be moved between recipes, `403` before the service for a non-author, `204` on delete, and the image routes |
 | `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
-| `tests/unit/collections/collection.service.test.ts` | 28 | listPublicCollectionsByUser (always public-filtered, user not found), listMyCollections (all public+private for the authenticated owner, user not found), getCollectionById (public, private own, private forbidden, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
-| `tests/unit/routers/paramsValidation.test.ts` | 32 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; the two `optionalAuthenticate` detail GETs forward the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s); `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
+| `tests/unit/collections/collection.service.test.ts` | 40 | listCollectionsByUser (public-filtered for an anonymous caller and for a signed-in non-owner, unfiltered when the caller is the listed user, ownership resolved from the target user row, user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private own, private forbidden, not found, carries both new shared-shape fields), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/routers/paramsValidation.test.ts` | 41 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 24 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), including the two public profile GETs and `GET /users/:userId/collections`; `GET /users/me`, `/users/me/collections`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
+| `tests/unit/collections/collection.controller.test.ts` | 20 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, the viewer sub forwarded (or left `undefined`) on `GET /collections/:collectionId` and `GET /users/:userId/collections`, the `me` route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
 | `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
 | `tests/unit/shelves/shelf.service.test.ts` | 17 | listActiveShelves (active + publish-window predicate, position/item ordering, empty shelves omitted, `criteria` never leaked, list items formatted by the shared recipe mapper), getShelfBySlug (pagination + meta, 404 unknown slug, 404 out-of-window via the same predicate), refreshShelf (atomic delete+insert+`refreshedAt` in one `$transaction`, order follows resolver output, resolver called with source/criteria/maxItems, 404), refreshAllShelves (one failing shelf doesn't abort the batch; single-slug mode skips the findMany), syncShelvesFromConfig (created vs updated counts, deletes shelves absent from config, rejects malformed definition/bad criteria/duplicate slug **before** any write) |
@@ -1648,6 +1721,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/middlewares/authenticate.test.ts` | 11 | `authenticate()`: dev bypass, missing/non-Bearer header, valid token, null userId, malformed token (401 not 500). `optionalAuthenticate()`: dev bypass, valid session, no session, malformed token — all three non-session cases call `next()` with no error instead of rejecting |
 | `tests/unit/middlewares/authorize.test.ts` | 5 | Missing `req.user` → 401, resolved owner id `null` → 404, mismatched owner → 403, matching owner → `next()`, unexpected error from the lookup propagates instead of being swallowed into 404 |
 | `tests/unit/middlewares/validate.test.ts` | 5 | Valid input passes + unknown keys stripped; schema failure → 422; NUL byte (`0x00`) rejected → 422 at top level, nested in arrays/objects, and in query params |
+| `tests/unit/middlewares/upload.test.ts` | 9 | `uploadSingleImage`/`uploadImagesArray` against a real Express app: buffers reach `req.file`/`req.files` in upload order; a missing file leaves `req.file` undefined (the **controller**, not this middleware, turns that into a 422); every multer failure becomes a 422 `VALIDATION_ERROR`, never a raw 500 — non-image mimetype, over-size, too many files, unexpected field name. Two deliberate pins: `image/svg+xml` **passes** the mimetype prefilter by design (the magic-byte check in `storage.service` is the real SVG guard, so this asserts the prefilter isn't what's being relied on), and multer's `fileSize` is exclusive — exactly 5MB is rejected, 5MB−1 accepted |
 | `tests/unit/middlewares/errorHandler.test.ts` | 4 | `ApiError` passthrough (status/code/details); body-parser `entity.too.large` → 413 `PAYLOAD_TOO_LARGE`; `entity.parse.failed` → 400 `INVALID_JSON`; unknown error → generic 500 (message hidden in production) |
 | `tests/unit/config/envGuards.test.ts` | 3 | `assertProductionOrigins` — rejects `*` in production (trimmed), allows an explicit allowlist, allows `*` in dev/test |
 | `tests/unit/middlewares/verifyClerkWebhook.test.ts` | 2 | Attaches verified event to `req.clerkEvent` on success; 400 `INVALID_WEBHOOK_SIGNATURE` on verification failure |
@@ -1699,9 +1773,10 @@ Both run via `docker/docker-compose.yml`.
 | `npm test` | Run all tests once |
 | `npm run test:watch` | Run tests in watch mode |
 | `npm run test:coverage` | Generate coverage report |
-| `npm run lint` | Run ESLint on `src/` |
+| `npm run lint` | Run ESLint on `src/` — **not** `tests/`, see the note below |
 | `npm run lint:fix` | Auto-fix ESLint issues |
-| `npm run format` | Format all files with Prettier |
+| `npm run format` | Format the repo with Prettier (everything except what `.prettierignore` excludes) |
+| `npm run format:check` | Verify formatting without writing — the CI-shaped form of the above |
 | `npm run db:migrate` | Create and apply a new migration (dev — requires interactive TTY) |
 | `npm run db:migrate:prod` | Apply pending migrations (production) |
 | `npm run db:generate` | Regenerate Prisma client after schema change |
@@ -1714,6 +1789,26 @@ Both run via `docker/docker-compose.yml`.
 | `npm run clerk:token -- <userId>` | Mint a real Clerk session token for local API testing (no frontend needed) |
 | `npm run dev:tunnel` | Start `postgres`+`meilisearch` (`docker compose up -d`) then an `ngrok http 3001` tunnel — pair with `npm run dev` running locally. Requires the `ngrok` CLI |
 | `npm run dev:tunnel:build` | Same, but also builds and starts the containerized `app` service (`docker compose up -d --build`) instead of running the server locally |
+
+### Formatting and lint scope
+
+`format` used to be `prettier --write src`, which quietly left `tests/` and `prisma/` outside
+Prettier's reach — 15 test files had drifted out of style before anyone noticed, because nothing
+ever checked them. It's now `prettier --write .` with a `.prettierignore`, so the exclusions are
+explicit and reviewable instead of implied by an argument.
+
+`.prettierignore` excludes build output and **`*.md`**. That last one is deliberate: CLAUDE.md is
+a living reference with wide tables that Prettier re-pads wholesale (~770 changed lines on the
+first run), which would bury every real documentation edit under whitespace churn. Markdown style
+here is a review concern, not a tooling one.
+
+`lint` is still `eslint src` only, and widening it is not a one-word change. `eslint.config.js`
+applies `recommended-type-checked` at the top level (no `files` filter) but sets
+`parserOptions.project` only for `src/**/*.ts`, and `tsconfig.json` has `"exclude": [… "tests"]`.
+So `npx eslint tests` doesn't report findings — it **crashes** on the first typed rule
+(`await-thenable`: "You have used a rule which requires type information…"). Linting tests needs a
+second config block pointing at a tsconfig that includes them (or `projectService: true`), plus
+probably a relaxed rule set for the `as never` mock casts. Worth doing, but as its own change.
 
 ---
 

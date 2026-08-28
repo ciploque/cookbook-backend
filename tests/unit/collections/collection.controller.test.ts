@@ -14,7 +14,7 @@ vi.mock('../../../src/config/database', () => ({ prisma: {} }));
 
 vi.mock('../../../src/modules/collections/collection.service', () => ({
   getOwnerId: vi.fn(async () => 'user_owner'),
-  listPublicCollectionsByUser: vi.fn(),
+  listCollectionsByUser: vi.fn(),
   listMyCollections: vi.fn(),
   getCollectionById: vi.fn(),
   createCollection: vi.fn(),
@@ -50,7 +50,14 @@ const USER_ID = '01a005f1-abca-7302-8cc6-e9762dea4933';
 const RECIPE_ID = '01a005f1-abca-7302-8cc6-e9762dea4934';
 
 const collection = { id: COLLECTION_ID, name: 'Weeknight dinners', isPublic: true, recipes: [] };
-const meta = { page: 1, limit: 20, total: 1, totalPages: 1, hasNextPage: false, hasPrevPage: false };
+const meta = {
+  page: 1,
+  limit: 20,
+  total: 1,
+  totalPages: 1,
+  hasNextPage: false,
+  hasPrevPage: false,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -83,7 +90,9 @@ describe('GET /collections/:collectionId', () => {
 
   it('surfaces the private-collection 404 rather than a 403', async () => {
     const { ApiError } = await import('../../../src/utils/ApiError');
-    vi.mocked(collectionService.getCollectionById).mockRejectedValue(ApiError.notFound('Collection'));
+    vi.mocked(collectionService.getCollectionById).mockRejectedValue(
+      ApiError.notFound('Collection'),
+    );
 
     const res = await api().get(`/collections/${COLLECTION_ID}`);
 
@@ -94,8 +103,8 @@ describe('GET /collections/:collectionId', () => {
 });
 
 describe('GET /users/:userId/collections vs /users/me/collections', () => {
-  it('the public route scopes by the path user id and needs no session', async () => {
-    vi.mocked(collectionService.listPublicCollectionsByUser).mockResolvedValue({
+  it('the by-id route scopes by the path user id and needs no session', async () => {
+    vi.mocked(collectionService.listCollectionsByUser).mockResolvedValue({
       data: [collection],
       meta,
     } as never);
@@ -104,13 +113,34 @@ describe('GET /users/:userId/collections vs /users/me/collections', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: [collection], meta });
-    expect(collectionService.listPublicCollectionsByUser).toHaveBeenCalledWith(
+    // Third arg is the viewer sub: optionalAuthenticate leaves it undefined for an anonymous
+    // caller, which is what makes the service fall back to public collections only.
+    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
       USER_ID,
       expect.objectContaining({ page: 1, limit: 20 }),
+      undefined,
     );
   });
 
-  it('the "me" route resolves from the session and never hits the public lister', async () => {
+  it('the by-id route forwards the caller sub when a session is present', async () => {
+    vi.mocked(collectionService.listCollectionsByUser).mockResolvedValue({
+      data: [collection],
+      meta,
+    } as never);
+
+    const res = await api()
+      .get(`/users/${USER_ID}/collections`)
+      .set(...AUTH);
+
+    expect(res.status).toBe(200);
+    expect(collectionService.listCollectionsByUser).toHaveBeenCalledWith(
+      USER_ID,
+      expect.anything(),
+      'user_owner',
+    );
+  });
+
+  it('the "me" route resolves from the session and never hits the by-id lister', async () => {
     vi.mocked(collectionService.listMyCollections).mockResolvedValue({ data: [], meta } as never);
 
     const res = await api()
@@ -122,7 +152,7 @@ describe('GET /users/:userId/collections vs /users/me/collections', () => {
       'user_owner',
       expect.objectContaining({ page: 1 }),
     );
-    expect(collectionService.listPublicCollectionsByUser).not.toHaveBeenCalled();
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
   });
 
   it('the "me" route requires a session', async () => {
@@ -304,9 +334,7 @@ describe('POST / DELETE /collections/:collectionId/follow', () => {
   it('does not apply the owner guard to follow', async () => {
     vi.mocked(collectionService.followCollection).mockResolvedValue(undefined as never);
 
-    await api()
-      .post(`/collections/${COLLECTION_ID}/follow`)
-      .set('x-dev-user-sub', 'user_follower');
+    await api().post(`/collections/${COLLECTION_ID}/follow`).set('x-dev-user-sub', 'user_follower');
 
     expect(collectionService.getOwnerId).not.toHaveBeenCalled();
   });
