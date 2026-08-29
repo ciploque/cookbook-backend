@@ -4,7 +4,13 @@ vi.mock('../../../src/config/env', () => ({
   trustedImageDomains: [] as string[],
 }));
 
-import { createRecipeSchema, recipeQuerySchema } from '../../../src/modules/recipes/recipe.schema';
+import {
+  createRecipeSchema,
+  patchRecipeSchema,
+  recipeQuerySchema,
+  updateRecipeSchema,
+} from '../../../src/modules/recipes/recipe.schema';
+import { generateRecipeSlug } from '../../../src/utils/slugify';
 
 describe('createRecipeSchema — categories', () => {
   const base = { title: 'Test', tags: [], ingredients: [], steps: [] };
@@ -84,5 +90,86 @@ describe('recipeQuerySchema — tags count cap', () => {
     const tags = Array.from({ length: 21 }, (_, i) => `tag${i}`).join(',');
     const result = recipeQuerySchema.safeParse({ tags });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('createRecipeSchema — step order uniqueness', () => {
+  const base = { title: 'Pasta' };
+
+  it('accepts steps with distinct order values', () => {
+    const result = createRecipeSchema.safeParse({
+      ...base,
+      steps: [
+        { order: 1, instruction: 'Boil' },
+        { order: 2, instruction: 'Drain' },
+      ],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  // Enforced by @@unique([recipeId, order]) at the DB level. Checked here so it lands as a 422
+  // instead of a P2002 the service would have to disambiguate from the title conflict.
+  it('rejects duplicate order values with a field-level message', () => {
+    const result = createRecipeSchema.safeParse({
+      ...base,
+      steps: [
+        { order: 1, instruction: 'Boil' },
+        { order: 1, instruction: 'Drain' },
+      ],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toBe('Step order values must be unique');
+  });
+
+  it('still applies through patchRecipeSchema, where steps are optional', () => {
+    expect(patchRecipeSchema.safeParse({}).success).toBe(true);
+    expect(
+      patchRecipeSchema.safeParse({
+        steps: [
+          { order: 3, instruction: 'a' },
+          { order: 3, instruction: 'b' },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('createRecipeSchema — title must yield a usable slug', () => {
+  it('accepts a title with letters, and one with only digits', () => {
+    expect(createRecipeSchema.safeParse({ title: 'Pasta Carbonara' }).success).toBe(true);
+    expect(createRecipeSchema.safeParse({ title: '42' }).success).toBe(true);
+  });
+
+  // slugify strips diacritics rather than dropping the characters, so these still slug fine.
+  it('accepts an accented title', () => {
+    expect(createRecipeSchema.safeParse({ title: 'Café Crème' }).success).toBe(true);
+  });
+
+  it.each([
+    ['emoji only', '🍕🍔'],
+    ['CJK only', '寿司'],
+    ['punctuation only', '!!!???'],
+    ['separators only', '- - -'],
+  ])('rejects a %s title, which would slug to nothing usable', (_label, title) => {
+    const result = createRecipeSchema.safeParse({ title });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.message).toBe(
+      'Title must contain at least one letter or number',
+    );
+  });
+
+  // Guards the '-' case specifically: slugify collapses runs of separators, so a separators-only
+  // title yields a truthy but useless '-' — an emptiness check alone would let it through.
+  it('rejects a separators-only title even though its slug is non-empty', () => {
+    expect(generateRecipeSlug('- - -')).toBe('-');
+    expect(createRecipeSchema.safeParse({ title: '- - -' }).success).toBe(false);
+  });
+
+  it('applies on rename too — through updateRecipeSchema and patchRecipeSchema', () => {
+    const body = { title: '🍕', ingredients: [], steps: [], tags: [], categories: [] };
+    expect(updateRecipeSchema.safeParse(body).success).toBe(false);
+    expect(patchRecipeSchema.safeParse({ title: '🍕' }).success).toBe(false);
+    // A patch that never mentions the title is unaffected.
+    expect(patchRecipeSchema.safeParse({ servings: 4 }).success).toBe(true);
   });
 });

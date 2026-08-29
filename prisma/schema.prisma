@@ -160,6 +160,7 @@ model Review {
 model Collection {
   id          String   @id @default(uuid(7)) @db.Uuid
   ownerId     String   @db.Uuid
+  slug        String
   name        String
   description String?
   isPublic    Boolean  @default(false)
@@ -170,6 +171,7 @@ model Collection {
   recipes   CollectionRecipe[]
   followers CollectionFollower[]
 
+  @@unique([ownerId, slug])
   @@index([ownerId])
   @@map("collections")
 }

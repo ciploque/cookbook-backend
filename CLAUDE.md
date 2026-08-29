@@ -289,7 +289,7 @@ widen their answer when the caller happened to be the owner (a private collectio
 |---|---|
 | `GET /users/:userId` · `GET /users/username/:username` | `GET /users/me` |
 | `GET /users/:userId/collections` | `GET /users/me/collections` |
-| `GET /collections/:collectionId` | `GET /users/me/collections/:collectionId` |
+| `GET /collections/:collectionId` · `GET /users/:username/collections/:slug` | `GET /users/me/collections/:collectionId` |
 
 The reasoning: a public URL that returns two different bodies to two different callers is a privacy
 rule enforced inside a read path instead of at the door, and it makes the endpoint look cacheable
@@ -362,7 +362,7 @@ Three limiters, all `windowMs: 15 * 60 * 1000` (15 min):
 | Limiter | Max | Applied to |
 |---|---|---|
 | `writeLimiter` | 50 | `${base}/v1/users`, `${base}/v1/reviews`, `${base}/v1/collections` (mount-level — covers every route on those routers, reads and writes alike), plus `recipeReportsRouter` (`POST /recipes/:recipeId/reports`) — mounted under the `/recipes` prefix but deliberately given `writeLimiter` rather than inheriting that prefix's `readLimiter`, since a report is a write on an abuse-prone endpoint |
-| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), `${base}/v1/categories` (read-only router — the curated registry), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` (including its two authenticated `me` reads, `GET /users/me/collections` and `GET /users/me/collections/:collectionId` — reads, so they keep this router's limiter rather than the collections module's `writeLimiter`) |
+| `readLimiter` | 300 | `${base}/v1/recipes` (mount-level — covers the whole recipe router, including writes, which otherwise had no limiter) and `${base}/v1/reports` (read-only router — `GET /reports/me`), `${base}/v1/shelves` (read-only router — the landing page, served from the precomputed snapshot), `${base}/v1/categories` (read-only router — the curated registry), plus the cross-module GET routes: `recipeReviewsRouter` (including the authenticated `GET /recipes/:recipeId/reviews/me` — a read, so it keeps this router's limiter rather than the reviews module's `writeLimiter`), `userRecipesRouter`, `userCollectionsRouter` (all four of its routes: the public `GET /users/:userId/collections` and `GET /users/:username/collections/:slug`, plus the two authenticated `me` reads, `GET /users/me/collections` and `GET /users/me/collections/:collectionId` — reads, so they keep this router's limiter rather than the collections module's `writeLimiter`) |
 | `uploadLimiter` | 30 | The four R2 image upload/delete routes on `recipeRouter`, plus the two on `reviewRouter` (`POST`/`DELETE /reviews/:reviewId/images`) — stricter than the surrounding `readLimiter`/`writeLimiter` since image uploads are heavier |
 
 ---
@@ -543,7 +543,7 @@ other, and both are returned on every user response, public and private alike.
 
 #### GET /users/:username/recipes/:recipename
 
-Returns full recipe detail for a recipe identified by the author's `username` and the recipe's `slug`. Slug uniqueness is scoped per user — two different users can have recipes with the same slug.
+Returns full recipe detail for a recipe identified by the author's `username` and the recipe's `slug`. Slug uniqueness is scoped per user — two different users can have recipes with the same slug. **A rename moves this URL**: the slug is re-derived whenever the title changes, so a link minted before the rename 404s — same caveat as `GET /users/:username/collections/:slug`.
 
 ```
 GET /api/v1/users/joao/recipes/pasta-carbonara
@@ -557,7 +557,7 @@ Same response shape as `GET /recipes/:recipeId`, viewer-scoped fields included �
 
 ```json
 {
-  "title": "string (required, max 120)",
+  "title": "string (required, max 120 — must slugify to something usable; see below)",
   "description": "string (optional, max 2000)",
   "authorNote": "string (optional, max 300 — brief personal note from the author)",
   "categories": ["string (category slug, max 5 items — must exist in the registry, else 422)"],
@@ -587,8 +587,19 @@ Same response shape as `GET /recipes/:recipeId`, viewer-scoped fields included �
 `ingredients` is capped at 200 items, `steps` at 100 items, `categories` at 5 (`422 VALIDATION_ERROR` beyond that).
 `categories` holds **slugs from the curated registry** — an unknown one is a `422` (unlike `tags`, which are created on the fly). Resolved before the write opens, so a bad slug never leaves a partial recipe. `PUT` replaces the set; `PATCH` leaves it untouched unless the key is present, and `"categories": []` clears it.
 Ingredients are stored in the order they appear in the array (`order` is auto-assigned from array index).
-Steps must have unique `order` values per recipe.
-Slug is generated at creation from the title (no random suffix) and is **immutable**. It's unique **per author**, not globally (`@@unique([authorId, slug])`) — creating two recipes with the same title as the same author returns `409 CONFLICT` (caught from the underlying Prisma `P2002` in `createRecipe`).
+Steps must have unique `order` values per recipe — enforced by `createRecipeSchema` as a
+`422 VALIDATION_ERROR` ("Step order values must be unique"), not just by the DB's
+`@@unique([recipeId, order])`. Previously only the constraint caught it, and the resulting `P2002`
+was blanket-mapped to the *title*-conflict `409`; the slug-conflict mapping now inspects
+`meta.target`, so this check is what keeps the case from becoming a 500.
+**The title must produce a usable slug.** A title of nothing but emoji, CJK or punctuation
+slugifies to `""`, and one of nothing but separators to `"-"` — neither is addressable as a URL.
+Both are a `422 VALIDATION_ERROR` ("Title must contain at least one letter or number") on `POST`,
+`PUT` and `PATCH` alike, raised by `createRecipeSchema` before the service runs, so **no recipe is
+created and no rename is applied**. Accented titles are fine (`slugify` strips diacritics rather
+than the characters: "Café" → `cafe`), as are digit-only ones ("42" → `42`).
+
+Slug is server-derived from the title (no random suffix) and **tracks it**: `PUT` always re-derives it (`title` is required there), `PATCH` only when `title` is present in the body, so a patch touching only `servings` leaves the recipe's URL alone. It's never accepted in a request body. It's unique **per author**, not globally (`@@unique([authorId, slug])`) — a title that slugifies to one the author already has returns `409 CONFLICT` on `POST`, `PUT` and `PATCH` alike (caught from the underlying Prisma `P2002` by `rethrowSlugConflict` in `recipe.service.ts`). Renaming therefore breaks links minted under the old slug — see the `Recipe.slug` bullet under [Schema decisions](#database-schema).
 
 **`coverImageUrl`/`imageUrls` are not part of this body.** They're server-managed: create the recipe first, then upload images against its id via the dedicated endpoints below. A new recipe is created with both fields empty.
 
@@ -993,6 +1004,7 @@ reports a recipe can never report it again.
 | GET | `/users/:userId/collections` | Public | List a user's **public** collections |
 | GET | `/users/me/collections` | Required | List all (public + private) collections owned by the authenticated user |
 | GET | `/collections/:collectionId` | Public | Get a single **public** collection with ordered recipes (first 50 only — see note below) |
+| GET | `/users/:username/collections/:slug` | Public | The same public collection by owner username + slug (SEO-friendly URL) |
 | GET | `/users/me/collections/:collectionId` | Required | Same detail shape for a collection the caller owns, public or private |
 | POST | `/collections` | Required | Create collection (metadata only) |
 | PUT | `/collections/:collectionId` | Required + Owner | Full metadata update |
@@ -1003,7 +1015,7 @@ reports a recipe can never report it again.
 | POST | `/collections/:collectionId/follow` | Required, not owner | Follow public collection |
 | DELETE | `/collections/:collectionId/follow` | Required | Unfollow |
 
-**Private collections are invisible to the two public routes, without exception.** Neither runs any
+**Private collections are invisible to the three public routes, without exception.** None runs any
 auth middleware, so a private collection is a `404 COLLECTION_NOT_FOUND` for every caller — its owner
 included — and `GET /users/:userId/collections` lists public collections only, whoever is asking.
 
@@ -1013,7 +1025,7 @@ caller's own collections, public and private alike:
 | Public — one answer for everybody | Owner-scoped counterpart |
 |---|---|
 | `GET /users/:userId/collections` | `GET /users/me/collections` |
-| `GET /collections/:collectionId` | `GET /users/me/collections/:collectionId` |
+| `GET /collections/:collectionId` · `GET /users/:username/collections/:slug` | `GET /users/me/collections/:collectionId` |
 
 The `/me` pair needs no id to identify the user and always means "the caller's own", so it requires a
 valid session; the public pair is how *anyone* addresses a specific user's profile. See the "where
@@ -1039,9 +1051,38 @@ it satisfies the "declare every param" rule in [Route Param Validation](#route-p
 **Errors:** `401 UNAUTHORIZED` · `404 COLLECTION_NOT_FOUND` (absent, or not the caller's) ·
 `422 VALIDATION_ERROR` on a non-UUID `collectionId`.
 
-**Route registration order:** both `me` routes are registered **before** `GET /users/:userId/collections` in `userCollectionsRouter` (`collection.router.ts`) so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`. (`/me/collections/:collectionId` has one more path segment than `/:userId/collections`, so it couldn't actually collide — the ordering is for consistency, and `/me/collections` genuinely needs it.)
+#### GET /users/:username/collections/:slug
 
-**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:userId/collections` / `GET /users/me/collections` / `GET /users/me/collections/:collectionId`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
+The SEO-friendly form of `GET /collections/:collectionId` — **identical behavior**, addressed by the
+owner's `username` and the collection's `slug` instead of an opaque uuid. Same
+[Collection Object Shape](#collection-object-shape), same 50-recipe cap, same public-only rule: a
+private collection is a `404` here too, for its owner included. It runs no auth middleware, so a
+session cannot change the answer.
+
+```
+GET /api/v1/users/joao/collections/weeknight-dinners
+```
+
+Slug uniqueness is scoped **per owner** (`@@unique([ownerId, slug])`), exactly as
+`Recipe.slug` is scoped per author — so both params are needed to identify a row, and two users can
+each have a `weeknight-dinners` collection. Resolved with a single `findFirst`
+(`where: { slug, owner: { username } }`), mirroring `getRecipeByUsernameAndSlug`.
+
+Like `GET /users/:username/recipes/:recipename`, this route has **no params schema**: both params are
+plain strings, so neither can raise a Prisma `P2023`, and an unknown value is already a clean 404
+from the service — see [Route Param Validation](#route-param-validation).
+
+**A rename moves this URL.** Renaming a collection re-derives its slug, so the URL always matches
+the title on the page — at the cost of breaking links minted before the rename. `Recipe.slug`
+behaves identically, so both pretty-URL routes carry the same caveat; see the shared slug bullet
+under [Schema decisions](#database-schema).
+
+**Errors:** `404 COLLECTION_NOT_FOUND` if the username doesn't exist, the slug doesn't match, or the
+collection is private — the three are deliberately indistinguishable.
+
+**Route registration order:** in `userCollectionsRouter` (`collection.router.ts`) the two `me` routes are registered **before** `GET /users/:userId/collections`, so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`. `GET /:username/collections/:slug` is registered **last**, after `GET /me/collections/:collectionId`, with which it shares a segment count and would otherwise collide for a user whose username is literally `me` (the same pre-existing ambiguity the recipe routes carry). `/me/collections` genuinely needs its ordering; `/me/collections/:collectionId` vs `/:userId/collections` differ in segment count and couldn't collide, so that pair's order is for consistency.
+
+**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:username/collections/:slug` / `GET /users/:userId/collections` / `GET /users/me/collections` / `GET /users/me/collections/:collectionId`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
 
 #### POST /collections — Request Body
 
@@ -1054,6 +1095,16 @@ it satisfies the "declare every param" rule in [Route Param Validation](#route-p
 ```
 
 PUT uses the same body (all fields required). PATCH makes all fields optional. **Neither PUT nor PATCH accepts a `recipes` field** — recipe membership is managed via the dedicated `/recipes` sub-routes.
+
+**`slug` is not part of any body.** It's server-derived from `name` via `generateCollectionSlug()`
+(`src/utils/slugify.ts`) on create, and re-derived on every rename — `PUT` always re-slugs (`name` is
+required there), `PATCH` only when `name` is present in the payload, so a patch touching only
+`isPublic` leaves the collection's URL alone.
+
+**Errors:** `409 CONFLICT` when the name slugifies to one the caller already has — the
+`@@unique([ownerId, slug])` `P2002`, caught in `collection.service.ts` and rethrown, same as
+`createRecipe` does for a duplicate title. It applies to `POST`, `PUT` and `PATCH` alike: a rename
+into a taken slug is refused rather than silently suffixed.
 
 #### POST /collections/:collectionId/recipes — Request Body
 
@@ -1076,6 +1127,7 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
 ```json
 {
   "id": "uuid",
+  "slug": "weeknight-dinners",
   "name": "string",
   "description": "string | null",
   "isPublic": true,
@@ -1090,6 +1142,11 @@ PUT uses the same body (all fields required). PATCH makes all fields optional. *
   "updatedAt": "ISO8601"
 }
 ```
+
+**`slug`** is the URL-safe handle used by `GET /users/:username/collections/:slug`, derived from
+`name` and unique per owner. Present on **every** collection response — the shared shape carries it,
+so the list endpoints and the write responses return it too, giving a client the SEO URL without a
+second fetch.
 
 **`coverImages`** is a card-preview convenience: the covers of the **first 4 recipes by `order`**
 (the same ordering `recipes` uses — `CollectionRecipe` has no `createdAt`, so `order` is the only
@@ -1225,8 +1282,8 @@ standard paginated `data`/`meta` pair.
 | `REVIEW_NOT_FOUND` | 404 | Review record not found |
 | `COLLECTION_NOT_FOUND` | 404 | Collection not found or private |
 | `SHELF_NOT_FOUND` | 404 | Shelf not found, inactive, or outside its publish window |
-| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation — including a malformed UUID in any route param (see [Route Param Validation](#route-param-validation)), and a NUL byte (`0x00`) in any validated string (rejected centrally in `validate.ts` since PostgreSQL `text` can't store it) |
-| `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, or duplicate review/follow) |
+| `VALIDATION_ERROR` | 422 | Request body/params/query failed Zod validation — including a malformed UUID in any route param (see [Route Param Validation](#route-param-validation)), and a NUL byte (`0x00`) in any validated string (rejected centrally in `validate.ts` since PostgreSQL `text` can't store it). Also a recipe `title` that can't produce a usable slug, and duplicate step `order` values — see [POST /recipes](#post-recipes--request-body) |
+| `CONFLICT` | 409 | Duplicate resource (e.g. username already taken, a recipe title or collection name that slugifies to one the caller already has — on create *and* rename, or duplicate review/follow) |
 | `PAYLOAD_TOO_LARGE` | 413 | Request body exceeds the `express.json` size limit (body-parser `entity.too.large`, mapped in `errorHandler.ts`) |
 | `INVALID_JSON` | 400 | Malformed JSON in the request body (body-parser `entity.parse.failed`) |
 | `INVALID_WEBHOOK_SIGNATURE` | 400 | `POST /webhooks/clerk` signature verification failed (bad/missing svix headers or secret mismatch) |
@@ -1397,6 +1454,7 @@ model Review {
 model Collection {
   id          String   @id @default(uuid(7)) @db.Uuid
   ownerId     String   @db.Uuid
+  slug        String                // unique per owner (not globally); derived from name, re-derived on rename
   name        String
   description String?
   isPublic    Boolean  @default(false)
@@ -1407,6 +1465,7 @@ model Collection {
   recipes   CollectionRecipe[]
   followers CollectionFollower[]
 
+  @@unique([ownerId, slug])         // mirrors Recipe's @@unique([authorId, slug])
   @@index([ownerId])
   @@map("collections")
 }
@@ -1503,7 +1562,45 @@ model ShelfItem {
 - All surrogate ids and FK columns use the native Postgres `uuid` type (`@db.Uuid`), not `text`. IDs are generated client-side as UUIDv7 (`@default(uuid(7))`, Prisma ≥5.14) rather than v4: v7 embeds a millisecond timestamp in the high bits so inserts stay roughly time-ordered (better B-tree locality on write-heavy tables) while keeping ~74 bits of randomness — equally unguessable/non-enumerable as v4 for this threat model. `User.authProviderId` is the one exception: it's Clerk's own external id format (not a UUID), so it stays `text`.
 - `User.username` is a unique, URL-safe handle used in human-friendly recipe URLs (`/users/:username/recipes/:slug`).
 - `Recipe.slug` is unique **per author** (`@@unique([authorId, slug])`), not globally. Two different users can have recipes with the same slug.
-- `Recipe.slug` is generated once at creation (the slugified title, no suffix) and is **immutable**.
+- **`Recipe.slug` and `Collection.slug` follow the same rule: the slug tracks the title.** Both are
+  derived from the display name (`Recipe.title` / `Collection.name`), scoped unique to their owner
+  (`@@unique([authorId, slug])` / `@@unique([ownerId, slug])`), server-managed, and never accepted
+  in a request body. Both are **re-derived on rename**: `PUT` always (the name field is required
+  there), `PATCH` only when that field is present in the payload, so a patch touching an unrelated
+  field never moves a URL.
+  - *Why mutable rather than frozen at creation.* `Recipe.slug` used to be immutable, which meant a
+    renamed recipe kept a slug contradicting the title on its own page — the URL and the heading
+    disagreed, permanently, with no way to reconcile them short of delete-and-recreate. Tracking
+    the title costs link stability: a URL minted before a rename 404s. That's the accepted
+    trade-off on both models, and it's the reason renames are worth thinking of as republishing
+    rather than editing. If link permanence is ever needed, the fix is a redirect table mapping
+    retired slugs to their recipe, not re-freezing the column.
+  - *A collision is a `409`, not an auto-suffix.* All six write paths
+    (`create`/`update`/`patch` × recipe/collection) catch the `P2002` and rethrow
+    `ApiError.conflict`. The alternative — appending `-2`, `-3` — never fails a write but silently
+    hands back a URL the user didn't ask for, and needs a retry loop to stay race-safe.
+  - *The recipe mapping inspects `meta.target`; the collection one doesn't need to.* A recipe write
+    creates its steps in the same transaction, and `RecipeStep` carries its own
+    `@@unique([recipeId, order])` — so a blanket `P2002 → 409` would report a duplicate step order
+    as a duplicate title. `rethrowSlugConflict` in `recipe.service.ts` checks the target for
+    `slug` and re-throws anything else; duplicate step orders are caught earlier as a `422` by
+    `createRecipeSchema` (see [Validation](#validation)). `[ownerId, slug]` is the *only* unique
+    constraint on `collections`, so its helper needs no such check.
+  - *A name that can't produce a usable slug is handled — differently on each model.* `slugify`
+    keeps only `[a-z0-9-]`, so a title/name of nothing but emoji, CJK or punctuation yields `''`,
+    and one of nothing but separators yields `'-'`. Both are unaddressable as a URL and would
+    occupy the owner's single "empty slug" slot, 409ing every subsequent such name.
+    - **Recipes reject it.** `createRecipeSchema.title` carries a refinement requiring
+      `generateRecipeSlug(title)` to contain at least one alphanumeric — a `422` on `POST`, `PUT`
+      and `PATCH` alike, before the service is reached, so no recipe is created or renamed. The
+      title is the author's to fix, and a generated stand-in would put them on a URL they never
+      chose. The check runs on the *generator's output*, not on the title, so it tracks whatever
+      `generateRecipeSlug` does — and rejects `'-'`, which a plain emptiness check would let past.
+    - **Collections fall back to `'collection'`.** `generateCollectionSlug()` substitutes the
+      constant rather than refusing the write. A collection is a private-by-default personal
+      shelf, often created in bulk, where failing the write is the harsher outcome; the per-owner
+      constraint still turns a second such name into the same `409` as any other collision.
+      Worth revisiting if collections ever grow a create flow where a 422 is the friendlier answer.
 - `Recipe.difficulty` is a plain `Int?` — the numeric scale is defined by the frontend (e.g. 1–5 stars). No DB-level constraint beyond `min 0` enforced by Zod.
 - `Recipe.description` is optional (`String?`). Missing descriptions are returned as `null` and truncated to an empty string in list items.
 - `Recipe.authorNote` is a plain optional `String?` (max 300 chars, Zod-enforced) — a short personal note from the author, distinct from the longer `description`. It's included in Meilisearch documents for response-shape parity between the Postgres and Meilisearch list paths, but deliberately left out of `searchableAttributes`/`filterableAttributes`/`sortableAttributes` — it's supplementary text, not a search/filter/sort target.
@@ -1738,19 +1835,19 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (547 passing)
+### Unit Tests (583 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
 | File | Tests | What's covered |
 |---|---|---|
 | `tests/unit/utils/ApiError.test.ts` | 12 | All static factory methods, prototype chain, code/statusCode mapping, multi-word (2 and 3+) resource names in `notFound()` |
-| `tests/unit/utils/slugify.test.ts` | 11 | Diacritics, special chars, slug format, deterministic slug from title |
+| `tests/unit/utils/slugify.test.ts` | 14 | Diacritics, special chars, slug format, deterministic slug from title; `generateCollectionSlug` (slugified name, diacritics/punctuation, and the `'collection'` fallback for a name that slugifies to nothing — the one behavior it adds over `generateRecipeSlug`) |
 | `tests/unit/utils/pagination.test.ts` | 14 | Defaults, clamping, meta flags, offset calculation, falsy `limit: '0'` |
 | `tests/unit/users/user.service.test.ts` | 36 | Provision (create/idempotent/conflict/unexpected error, race on authProviderId with successful and failed re-fetch), getMe (both counts returned with `_count` stripped, collections counted **unfiltered**, not found), updateMe (incl. `about` updated independently of `bio`, and absent from the payload when omitted), getUserById/getUserByUsername (`authProviderId` **and** `_count` stripped, `recipeCount`/`collectionCount` surfaced from the relation counts, collection count filter is always `{ isPublic: true }` — pinned by calling through a widened signature with a caller sub and asserting the filter doesn't budge, not found), provisionFromWebhook (username derivation/fallbacks, collision retry, race on authProviderId, retries exhausted), deleteUserByAuthProviderId (success, already-absent no-op, unexpected error) |
-| `tests/unit/recipes/recipe.service.test.ts` | 70 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug-collision `P2002` → 409 CONFLICT, unexpected create error re-thrown |
+| `tests/unit/recipes/recipe.service.test.ts` | 75 | All CRUD paths, ingredient ordering, description truncation, pagination, tag mapping, getRecipeByUsernameAndSlug, viewer state on both detail GETs (anonymous → `false`/`false` with **no** viewer queries issued, reviewed+saved → both `true`, neither → both `false`, lookups scoped by recipe id + caller `authProviderId` and by *owned* collections only), Meilisearch delegation when `q` present, `category` filtered through the join table, category mapping to a flat `categories` array, create/update linking resolved category rows, unknown category → 422 with no recipe write and no `$transaction`, PATCH leaving categories untouched when the key is absent, `minRating` filter, `sortBy=averageRating`, cover/gallery image upload-delete, atomic 10-image gallery cap (fast-path reject, `$executeRaw` guarded append, race-loss cleanup of stored objects), image cleanup on recipe delete, slug re-derived from the title on PUT and on a PATCH that carries one (and **not** on a PATCH without one), slug-collision `P2002` → 409 CONFLICT on create/update/patch, the `RecipeStep` `[recipeId, order]` `P2002` re-thrown untouched rather than mislabelled as a title conflict, unexpected create error re-thrown |
 | `tests/unit/recipes/recipe.controller.test.ts` | 21 | Real recipe routers on a bare Express app, service mocked — pins the HTTP contract: the `{ success, data }` / `{ success, data, meta }` envelope with `meta` beside `data` (not nested), query defaults coerced (`minRating` a number, not `"4"`), a service 404 surfacing as the error envelope rather than a 500, `201` on create with the author taken from the session (never the body), `coverImageUrl`/`imageUrls` stripped from a create body, `401` before the service on an unauthenticated create, `403` before the service when the caller is not the author, `204` with an empty body on delete, and the image routes (buffers forwarded in order, `422` with a field-level message when no file is attached) |
-| `tests/unit/recipes/recipe.schema.test.ts` | 11 | `categories` lowercased/trimmed per slug on write, defaults to `[]`, capped at 5, rejects empty slugs; `category` filter still lowercased/trimmed (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs; `videoUrl` host allowlist; `authorNote` cap |
+| `tests/unit/recipes/recipe.schema.test.ts` | 22 | `categories` lowercased/trimmed per slug on write, defaults to `[]`, capped at 5, rejects empty slugs; `category` filter still lowercased/trimmed (`recipeQuerySchema`); `tags` query param rejects more than 20 comma-separated slugs; `videoUrl` host allowlist; `authorNote` cap; step `order` uniqueness (distinct orders pass, a duplicate is a field-level 422, and the check survives `.partial()` into `patchRecipeSchema`); `title` must slugify to something usable (letters/digits/accents accepted; emoji-, CJK-, punctuation- and separator-only rejected — the last pinned explicitly, since its slug is a truthy `'-'` that an emptiness check would pass — and the rule applies through `updateRecipeSchema`/`patchRecipeSchema` while a title-less patch is unaffected) |
 | `tests/unit/recipes/recipe.search.test.ts` | 18 | Meilisearch index/update/delete sync, searchRecipesViaMeili response mapping (page/hitsPerPage, exact `totalHits`), `minRating` filter clause, filter string escaping for the `categories`/tag slug clauses, `updateIndexedRecipeRating` partial document sync |
 | `tests/unit/categories/category.service.test.ts` | 9 | `listCategories` (flattens `_count` into `recipeCount`, keeps zero-count categories, orders by name, empty registry); `resolveCategories` (empty input short-circuits with no query, de-duplicates into one `findMany`, unknown slugs → 422 naming every one of them); `syncCategoriesFromConfig` (created vs updated counts, reports extras **without deleting**, rejects a malformed definition / duplicate slug / duplicate name before any write) |
 | `tests/unit/categories/category.schema.test.ts` | 6 | `categoryDefinitionSchema` — URL-safe slug regex, empty/oversized name and slug. Plus the checked-in `categories.config.ts` itself: every definition valid, unique slugs and names, and the `drinks` slug the `top-drinks` shelf depends on is present |
@@ -1762,9 +1859,9 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
 | `tests/unit/reviews/review.controller.test.ts` | 18 | Real review routers on a bare Express app, service mocked — the paginated envelope, `filter`/`order` forwarded and an unsupported `filter` rejected with 422, `GET /recipes/:recipeId/reviews/summary` not shadowed by the list route, `GET …/reviews/me` resolving the caller from the session and requiring auth (unlike its two sibling reads), `201` on create with the author from the session, a client-supplied `imageUrls` stripped, the duplicate-review conflict surfacing as 409, `recipeId` stripped from a `PUT` body so a review can't be moved between recipes, `403` before the service for a non-author, `204` on delete, and the image routes |
 | `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
-| `tests/unit/collections/collection.service.test.ts` | 43 | listCollectionsByUser (always public-filtered — including when the listed user is themselves the caller, pinned through a widened signature; the target user is looked up only to 404 an unknown id; user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private → 404 **even for its owner**, not found, carries both shared-shape fields), getMyCollectionById (own private, own public, another user's → 404 not 403, not found), createCollection (success, user not found), updateCollection/patchCollection (metadata only), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
-| `tests/unit/routers/paramsValidation.test.ts` | 40 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 25 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route (the four recipe ones) forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), while the public profile/collection reads pass **no** caller at all, session or not; `GET /users/me`, `/users/me/collections`, `/users/me/collections/:collectionId`, `/users/username/:username` and `/users/:username/recipes/:recipename` still resolve (route-ordering + param-stripping regressions) |
-| `tests/unit/collections/collection.controller.test.ts` | 24 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, **no** caller reaching the service on `GET /collections/:collectionId` and `GET /users/:userId/collections` even with a session attached, `GET /users/me/collections/:collectionId` taking its sub from the session / 401ing without one / not being swallowed by the `:userId` wildcard / surfacing the not-mine 404, the `me` list route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
+| `tests/unit/collections/collection.service.test.ts` | 55 | listCollectionsByUser (always public-filtered — including when the listed user is themselves the caller, pinned through a widened signature; the target user is looked up only to 404 an unknown id; user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private → 404 **even for its owner**, not found, carries both shared-shape fields), getCollectionByUsernameAndSlug (matched on `{ slug, owner: { username } }`, byte-identical result to the id route, private → 404, unknown username *or* slug → the same 404), getMyCollectionById (own private, own public, another user's → 404 not 403, not found), createCollection (success, user not found, slug derived from the name, `[ownerId, slug]` `P2002` → 409, unexpected error re-thrown), updateCollection/patchCollection (metadata only, slug re-derived on rename, PATCH without `name` leaves `slug` out of the update entirely, collision → 409 on both), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/routers/paramsValidation.test.ts` | 41 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 25 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route (the four recipe ones) forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), while the public profile/collection reads pass **no** caller at all, session or not; `GET /users/me`, `/users/me/collections`, `/users/me/collections/:collectionId`, `/users/username/:username`, `/users/:username/recipes/:recipename` and `/users/:username/collections/:slug` (both string params intact, not rejected by the sibling `:userId` uuid guard) still resolve (route-ordering + param-stripping regressions) |
+| `tests/unit/collections/collection.controller.test.ts` | 28 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, **no** caller reaching the service on `GET /collections/:collectionId`, `GET /users/:username/collections/:slug` and `GET /users/:userId/collections` even with a session attached, the SEO route forwarding both string params / returning the id route's envelope / not swallowing `/users/me/collections/:collectionId` / surfacing the 404, `GET /users/me/collections/:collectionId` taking its sub from the session / 401ing without one / not being swallowed by the `:userId` wildcard / surfacing the not-mine 404, the `me` list route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
 | `tests/unit/reports/report.schema.test.ts` | 12 | `createRecipeReportSchema` — accepts every recipe topic, rejects unknown/missing topic, `message` optional and capped at 2000, strips a client-supplied `status`; `recipeReportParamsSchema` — accepts/rejects by UUID; `reportQuerySchema` — page/limit defaults, string coercion, out-of-range rejection |
 | `tests/unit/shelves/shelf.service.test.ts` | 17 | listActiveShelves (active + publish-window predicate, position/item ordering, empty shelves omitted, `criteria` never leaked, list items formatted by the shared recipe mapper), getShelfBySlug (pagination + meta, 404 unknown slug, 404 out-of-window via the same predicate), refreshShelf (atomic delete+insert+`refreshedAt` in one `$transaction`, order follows resolver output, resolver called with source/criteria/maxItems, 404), refreshAllShelves (one failing shelf doesn't abort the batch; single-slug mode skips the findMany), syncShelvesFromConfig (created vs updated counts, deletes shelves absent from config, rejects malformed definition/bad criteria/duplicate slug **before** any write) |

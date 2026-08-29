@@ -37,6 +37,7 @@ vi.mock('../../../src/modules/reviews/review.service', () => ({
 vi.mock('../../../src/modules/collections/collection.service', () => ({
   getOwnerId: vi.fn(async () => 'dev-user'),
   getCollectionById: vi.fn(async () => ({ id: 'ok' })),
+  getCollectionByUsernameAndSlug: vi.fn(async () => ({ id: 'ok' })),
   getMyCollectionById: vi.fn(async () => ({ id: 'ok' })),
   listCollectionsByUser: vi.fn(async () => ({ data: [], meta: {} })),
   listMyCollections: vi.fn(async () => ({ data: [], meta: {} })),
@@ -268,6 +269,19 @@ describe('non-uuid routes are unaffected', () => {
       'pasta-carbonara',
       undefined,
     );
+  });
+
+  // Same reasoning as the recipe route above: two plain-string params, so no params schema —
+  // one covering only `username` would strip `slug` on the way through.
+  it('GET /users/:username/collections/:slug keeps both string params', async () => {
+    const res = await api().get('/users/joao/collections/weeknight-dinners');
+    expect(res.status).toBe(200);
+    expect(collectionService.getCollectionByUsernameAndSlug).toHaveBeenCalledWith(
+      'joao',
+      'weeknight-dinners',
+    );
+    // The uuid guard on the sibling /:userId/collections route must not reject it.
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
   });
 
   it('GET /users/username/:username is not shadowed by the /:userId uuid guard', async () => {

@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
+import { generateCollectionSlug } from '../../utils/slugify';
 import {
   AddRecipesInput,
   CollectionQuery,
@@ -53,6 +54,15 @@ function formatCollection(
     recipeCount: _count.recipes,
     followerCount: _count.followers,
   };
+}
+
+// The only unique constraint on Collection is @@unique([ownerId, slug]), so a P2002 from a
+// create/update can only ever mean "this owner already has a collection under that slug".
+function rethrowSlugConflict(err: unknown): never {
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    throw ApiError.conflict('You already have a collection with this name');
+  }
+  throw err;
 }
 
 async function paginateCollections(
@@ -114,6 +124,22 @@ export async function getCollectionById(collectionId: string) {
   return formatCollection(collection);
 }
 
+// The SEO-friendly counterpart to getCollectionById: same public-only rule, addressed by the
+// owner's username and the collection's slug instead of an opaque uuid. Slug uniqueness is scoped
+// per owner, so both halves are needed to identify a row — and a miss on either is the same
+// 404 the id route returns, which also keeps a private collection indistinguishable from an
+// absent one.
+export async function getCollectionByUsernameAndSlug(username: string, slug: string) {
+  const collection = await prisma.collection.findFirst({
+    where: { slug, owner: { username } },
+    include: collectionInclude,
+  });
+
+  if (!collection || !collection.isPublic) throw ApiError.notFound('Collection');
+
+  return formatCollection(collection);
+}
+
 // The owner-scoped counterpart: any collection the caller owns, public or private. A collection
 // they don't own is a 404 rather than a 403 — a non-owner shouldn't learn the id exists, which is
 // the same stance getCollectionById takes on a private one.
@@ -134,28 +160,47 @@ export async function createCollection(authProviderId: string, input: CreateColl
   const owner = await prisma.user.findUnique({ where: { authProviderId } });
   if (!owner) throw ApiError.notFound('User');
 
-  const collection = await prisma.collection.create({
-    data: {
-      ownerId: owner.id,
-      name: input.name,
-      description: input.description,
-      isPublic: input.isPublic,
-    },
-    include: collectionInclude,
-  });
+  let collection;
+  try {
+    collection = await prisma.collection.create({
+      data: {
+        ownerId: owner.id,
+        slug: generateCollectionSlug(input.name),
+        name: input.name,
+        description: input.description,
+        isPublic: input.isPublic,
+      },
+      include: collectionInclude,
+    });
+  } catch (err) {
+    rethrowSlugConflict(err);
+  }
 
   return formatCollection(collection);
 }
 
+// The slug tracks the name: renaming a collection re-slugs it, so the SEO URL always reflects the
+// title on the page. Unlike Recipe.slug, which is fixed at creation — the trade-off taken here is
+// that old links 404 after a rename, in exchange for never serving a stale slug.
 export async function updateCollection(collectionId: string, input: UpdateCollectionInput) {
   const existing = await prisma.collection.findUnique({ where: { id: collectionId } });
   if (!existing) throw ApiError.notFound('Collection');
 
-  const collection = await prisma.collection.update({
-    where: { id: collectionId },
-    data: { name: input.name, description: input.description, isPublic: input.isPublic },
-    include: collectionInclude,
-  });
+  let collection;
+  try {
+    collection = await prisma.collection.update({
+      where: { id: collectionId },
+      data: {
+        slug: generateCollectionSlug(input.name),
+        name: input.name,
+        description: input.description,
+        isPublic: input.isPublic,
+      },
+      include: collectionInclude,
+    });
+  } catch (err) {
+    rethrowSlugConflict(err);
+  }
 
   return formatCollection(collection);
 }
@@ -164,15 +209,25 @@ export async function patchCollection(collectionId: string, input: PatchCollecti
   const existing = await prisma.collection.findUnique({ where: { id: collectionId } });
   if (!existing) throw ApiError.notFound('Collection');
 
-  const collection = await prisma.collection.update({
-    where: { id: collectionId },
-    data: {
-      ...(input.name !== undefined && { name: input.name }),
-      ...(input.description !== undefined && { description: input.description }),
-      ...(input.isPublic !== undefined && { isPublic: input.isPublic }),
-    },
-    include: collectionInclude,
-  });
+  let collection;
+  try {
+    collection = await prisma.collection.update({
+      where: { id: collectionId },
+      data: {
+        // Re-slugged only when the name is actually part of the patch — a PATCH that touches
+        // only `isPublic` must not move the collection's URL.
+        ...(input.name !== undefined && {
+          slug: generateCollectionSlug(input.name),
+          name: input.name,
+        }),
+        ...(input.description !== undefined && { description: input.description }),
+        ...(input.isPublic !== undefined && { isPublic: input.isPublic }),
+      },
+      include: collectionInclude,
+    });
+  } catch (err) {
+    rethrowSlugConflict(err);
+  }
 
   return formatCollection(collection);
 }

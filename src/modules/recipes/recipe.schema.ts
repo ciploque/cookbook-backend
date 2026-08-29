@@ -1,6 +1,22 @@
 import { z } from 'zod';
 import { trustedImageUrlSchema } from '../../utils/imageUrl';
 import { trustedVideoUrlSchema } from '../../utils/videoUrl';
+import { generateRecipeSlug } from '../../utils/slugify';
+
+// `slugify` keeps only [a-z0-9-], so a title made entirely of characters it strips (emoji, CJK,
+// punctuation) produces '' — and one of only separators produces '-'. Either way the recipe would
+// be unreachable through GET /users/:username/recipes/:recipename and would occupy the author's
+// [authorId, slug] slot for every other such title. Rejected here rather than papered over with a
+// fallback slug: the title is the author's to fix, and a generated stand-in would be a URL they
+// never chose. The check runs on the generator's output, not on the title, so it tracks whatever
+// generateRecipeSlug does.
+const titleSchema = z
+  .string()
+  .min(1)
+  .max(120)
+  .refine((title) => /[a-z0-9]/.test(generateRecipeSlug(title)), {
+    message: 'Title must contain at least one letter or number',
+  });
 
 const ingredientSchema = z.object({
   name: z.string().min(1).max(200),
@@ -16,7 +32,7 @@ const stepSchema = z.object({
 });
 
 export const createRecipeSchema = z.object({
-  title: z.string().min(1).max(120),
+  title: titleSchema,
   description: z.string().max(2000).optional(),
   authorNote: z.string().max(300).optional(),
   // Category *slugs*, resolved against the curated Category table by the service — an unknown
@@ -29,7 +45,16 @@ export const createRecipeSchema = z.object({
   servings: z.number().int().min(1).optional(),
   difficulty: z.number().int().min(0).optional(),
   ingredients: z.array(ingredientSchema).max(200).default([]),
-  steps: z.array(stepSchema).max(100).default([]),
+  // `order` is unique per recipe at the DB level (@@unique([recipeId, order])). Checked here so a
+  // duplicate is a field-level 422 rather than a P2002 surfacing from inside the write — which
+  // the service can no longer mistake for the [authorId, slug] title conflict.
+  steps: z
+    .array(stepSchema)
+    .max(100)
+    .refine((steps) => new Set(steps.map((s) => s.order)).size === steps.length, {
+      message: 'Step order values must be unique',
+    })
+    .default([]),
 });
 
 export const updateRecipeSchema = createRecipeSchema;

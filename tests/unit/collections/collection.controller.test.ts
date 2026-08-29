@@ -17,6 +17,7 @@ vi.mock('../../../src/modules/collections/collection.service', () => ({
   listCollectionsByUser: vi.fn(),
   listMyCollections: vi.fn(),
   getCollectionById: vi.fn(),
+  getCollectionByUsernameAndSlug: vi.fn(),
   getMyCollectionById: vi.fn(),
   createCollection: vi.fn(),
   updateCollection: vi.fn(),
@@ -203,6 +204,64 @@ describe('GET /users/me/collections/:collectionId', () => {
     const res = await api()
       .get(`/users/me/collections/${COLLECTION_ID}`)
       .set(...AUTH);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('COLLECTION_NOT_FOUND');
+  });
+});
+
+describe('GET /users/:username/collections/:slug', () => {
+  it('forwards both string params and returns the same envelope as the id route', async () => {
+    vi.mocked(collectionService.getCollectionByUsernameAndSlug).mockResolvedValue(
+      collection as never,
+    );
+
+    const res = await api().get('/users/joao/collections/weeknight-dinners');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: collection });
+    expect(collectionService.getCollectionByUsernameAndSlug).toHaveBeenCalledWith(
+      'joao',
+      'weeknight-dinners',
+    );
+  });
+
+  // Public, exactly like GET /collections/:collectionId: no auth middleware, so a session can
+  // never widen the answer.
+  it('passes no caller to the service even when a session is present', async () => {
+    vi.mocked(collectionService.getCollectionByUsernameAndSlug).mockResolvedValue(
+      collection as never,
+    );
+
+    await api()
+      .get('/users/joao/collections/weeknight-dinners')
+      .set(...AUTH);
+
+    expect(collectionService.getCollectionByUsernameAndSlug).toHaveBeenCalledWith(
+      'joao',
+      'weeknight-dinners',
+    );
+  });
+
+  // Same segment count as /me/collections/:collectionId, which is registered first — a username
+  // literally called "me" is the pre-existing ambiguity this pins.
+  it('does not swallow GET /users/me/collections/:collectionId', async () => {
+    vi.mocked(collectionService.getMyCollectionById).mockResolvedValue(collection as never);
+
+    await api()
+      .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+
+    expect(collectionService.getCollectionByUsernameAndSlug).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a miss on either param as the 404 envelope', async () => {
+    const { ApiError } = await import('../../../src/utils/ApiError');
+    vi.mocked(collectionService.getCollectionByUsernameAndSlug).mockRejectedValue(
+      ApiError.notFound('Collection'),
+    );
+
+    const res = await api().get('/users/nobody/collections/missing');
 
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('COLLECTION_NOT_FOUND');

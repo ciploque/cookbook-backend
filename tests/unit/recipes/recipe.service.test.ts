@@ -67,6 +67,7 @@ import {
   searchRecipesViaMeili,
   updateIndexedRecipe,
 } from '../../../src/modules/recipes/recipe.search';
+import { generateRecipeSlug } from '../../../src/utils/slugify';
 import { upsertTags } from '../../../src/modules/tags/tag.service';
 import { resolveCategories } from '../../../src/modules/categories/category.service';
 import { deleteImage, storeImage } from '../../../src/modules/storage/storage.service';
@@ -612,13 +613,49 @@ describe('updateRecipe()', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('never writes slug — it is immutable even when the title changes', async () => {
+  // The slug follows the title, so a renamed recipe gets a new pretty URL rather than keeping one
+  // that contradicts the page. `title` is required on PUT, so this re-derives unconditionally.
+  it('re-derives the slug from the new title', async () => {
     vi.mocked(upsertTags).mockResolvedValue([]);
     const tx = mockUpdateTransaction();
 
     await updateRecipe('recipe-uuid', updateInput);
 
-    expect(tx.update.mock.calls[0][0].data).not.toHaveProperty('slug');
+    expect(generateRecipeSlug).toHaveBeenCalledWith('Updated Carbonara');
+    expect(tx.update.mock.calls[0][0].data).toMatchObject({
+      slug: 'pasta-carbonara-abcd',
+      title: 'Updated Carbonara',
+    });
+  });
+
+  it('maps the [authorId, slug] unique violation to 409 CONFLICT', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['authorId', 'slug'] },
+      }),
+    );
+
+    await expect(updateRecipe('recipe-uuid', updateInput)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+    });
+  });
+
+  // Steps carry their own unique constraint, created in the same transaction. Blanket-mapping
+  // P2002 would report a duplicate step order as a duplicate title.
+  it('does not mistake the step-order unique violation for a title conflict', async () => {
+    vi.mocked(upsertTags).mockResolvedValue([]);
+    const stepConflict = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: '5.0.0',
+      meta: { target: ['recipeId', 'order'] },
+    });
+    vi.mocked(prisma.$transaction).mockRejectedValue(stepConflict);
+
+    await expect(updateRecipe('recipe-uuid', updateInput)).rejects.toBe(stepConflict);
   });
 
   it('does not let a PUT body overwrite the server-managed image fields', async () => {
@@ -690,6 +727,66 @@ describe('patchRecipe()', () => {
     });
 
     expect(updateIndexedRecipe).not.toHaveBeenCalled();
+  });
+
+  it('re-derives the slug when the patch includes a title', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { title: 'Updated Title' });
+
+    expect(generateRecipeSlug).toHaveBeenCalledWith('Updated Title');
+    expect(updateMock.mock.calls[0][0].data).toMatchObject({
+      slug: 'pasta-carbonara-abcd',
+      title: 'Updated Title',
+    });
+  });
+
+  // A patch that never mentions the title must not move the recipe's URL.
+  it('leaves the slug alone when the patch has no title', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    const updateMock = vi.fn().mockResolvedValue(mockRecipeFull);
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) =>
+      fn({
+        recipeIngredient: { deleteMany: vi.fn() },
+        recipeStep: { deleteMany: vi.fn() },
+        recipeTag: { deleteMany: vi.fn() },
+        recipeCategory: { deleteMany: vi.fn() },
+        recipe: { update: updateMock },
+      } as never),
+    );
+
+    await patchRecipe('recipe-uuid', { servings: 6 });
+
+    const data = updateMock.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty('slug');
+    expect(data).not.toHaveProperty('title');
+    expect(generateRecipeSlug).not.toHaveBeenCalled();
+  });
+
+  it('maps a title collision to 409 CONFLICT', async () => {
+    vi.mocked(prisma.recipe.findUnique).mockResolvedValue(mockRecipeFull as never);
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['authorId', 'slug'] },
+      }),
+    );
+
+    await expect(patchRecipe('recipe-uuid', { title: 'Taken Title' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+    });
   });
 
   it('passes videoUrl through to the update data when provided', async () => {

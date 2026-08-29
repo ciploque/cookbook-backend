@@ -262,6 +262,9 @@ const CollectionSchema = registry.register(
   'Collection',
   z.object({
     id: z.string().uuid(),
+    // URL-safe handle, unique per owner and derived from `name` — re-slugged whenever the name
+    // changes, so GET /users/{username}/collections/{slug} always matches the current title.
+    slug: z.string(),
     name: z.string(),
     description: z.string().nullable(),
     isPublic: z.boolean(),
@@ -565,6 +568,11 @@ registry.registerPath({
   path: '/api/v1/recipes',
   tags: ['Recipes'],
   summary: 'Create recipe',
+  description:
+    'The slug is server-derived from `title` and is not accepted in the body. It must be unique ' +
+    'among the caller’s own recipes — a title that slugifies to one they already have is a 409. ' +
+    'A title that cannot produce a usable slug at all (nothing but emoji, CJK, punctuation or ' +
+    'separators) is a 422 and no recipe is created; accented and digit-only titles are fine.',
   security: [{ bearerAuth: [] }],
   request: {
     body: { content: { 'application/json': { schema: CreateRecipeBody } } },
@@ -582,6 +590,10 @@ registry.registerPath({
       description: 'Missing or invalid token',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    409: {
+      description: 'The caller already has a recipe with this title',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
     422: {
       description: 'Validation error',
       content: { 'application/json': { schema: ErrorSchema } },
@@ -594,6 +606,11 @@ registry.registerPath({
   path: '/api/v1/recipes/{recipeId}',
   tags: ['Recipes'],
   summary: 'Full update (replaces ingredients, steps and tags)',
+  description:
+    'Renaming re-derives the slug, which moves the recipe’s ' +
+    'GET /users/{username}/recipes/{recipename} URL — `title` is required here, so every full ' +
+    'update re-derives it. A title colliding with another of the caller’s recipes is a 409; one ' +
+    'that cannot produce a usable slug is a 422 and the rename is not applied.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ recipeId: z.string().uuid() }),
@@ -620,6 +637,10 @@ registry.registerPath({
       description: 'Recipe not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    409: {
+      description: 'The caller already has a recipe with this title',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
     422: {
       description: 'Validation error',
       content: { 'application/json': { schema: ErrorSchema } },
@@ -632,6 +653,11 @@ registry.registerPath({
   path: '/api/v1/recipes/{recipeId}',
   tags: ['Recipes'],
   summary: 'Partial update',
+  description:
+    'The slug is re-derived only when `title` is present in the body — a patch touching only ' +
+    'other fields leaves the recipe’s URL alone. A title colliding with another of the caller’s ' +
+    'recipes is a 409; one that cannot produce a usable slug is a 422 and the rename is not ' +
+    'applied.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ recipeId: z.string().uuid() }),
@@ -656,6 +682,10 @@ registry.registerPath({
     },
     404: {
       description: 'Recipe not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'The caller already has a recipe with this title',
       content: { 'application/json': { schema: ErrorSchema } },
     },
     422: {
@@ -911,9 +941,10 @@ registry.registerPath({
   tags: ['Recipes'],
   summary: 'Get recipe by author username + slug',
   description:
-    'Human-friendly URL. Slug uniqueness is scoped per user. Public, but a bearer token is ' +
-    'optional: when present, `hasReviewed` and `isSavedInCollection` describe the ' +
-    'authenticated caller. Both are `false` for an anonymous request.',
+    'Human-friendly URL. Slug uniqueness is scoped per user. The slug is re-derived whenever the ' +
+    'recipe is renamed, so a link minted before a rename no longer resolves. Public, but a ' +
+    'bearer token is optional: when present, `hasReviewed` and `isSavedInCollection` describe ' +
+    'the authenticated caller. Both are `false` for an anonymous request.',
   request: {
     params: z.object({ username: z.string(), recipename: z.string() }),
   },
@@ -1397,10 +1428,44 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: 'get',
+  path: '/api/v1/users/{username}/collections/{slug}',
+  tags: ['Collections'],
+  summary: 'Get public collection by owner username + slug',
+  description:
+    'SEO-friendly URL for GET /collections/{collectionId} — identical behaviour and response ' +
+    'shape. Slug uniqueness is scoped per owner, so both params are needed to identify a ' +
+    'collection. Fully public: a private collection is a 404 for every caller, its owner ' +
+    'included. The slug is re-derived whenever the collection is renamed, so a link minted ' +
+    'before a rename no longer resolves.',
+  request: {
+    params: z.object({ username: z.string(), slug: z.string() }),
+  },
+  responses: {
+    200: {
+      description: 'Collection detail',
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+        },
+      },
+    },
+    404: {
+      description: 'Collection not found or private, or no such username',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
   method: 'post',
   path: '/api/v1/collections',
   tags: ['Collections'],
   summary: 'Create collection',
+  description:
+    'The slug is server-generated from `name` and is not accepted in the body. It must be ' +
+    'unique among the caller’s own collections — a name that slugifies to one they already ' +
+    'have is a 409.',
   security: [{ bearerAuth: [] }],
   request: {
     body: { content: { 'application/json': { schema: CreateCollectionBody } } },
@@ -1418,6 +1483,10 @@ registry.registerPath({
       description: 'Missing or invalid token',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    409: {
+      description: 'The caller already has a collection with this name',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
     422: {
       description: 'Validation error',
       content: { 'application/json': { schema: ErrorSchema } },
@@ -1430,6 +1499,10 @@ registry.registerPath({
   path: '/api/v1/collections/{collectionId}',
   tags: ['Collections'],
   summary: 'Full metadata update',
+  description:
+    'Renaming re-derives the slug, which moves the collection’s ' +
+    'GET /users/{username}/collections/{slug} URL. A name colliding with another of the ' +
+    'caller’s collections is a 409.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ collectionId: z.string().uuid() }),
@@ -1456,6 +1529,10 @@ registry.registerPath({
       description: 'Collection not found',
       content: { 'application/json': { schema: ErrorSchema } },
     },
+    409: {
+      description: 'The caller already has a collection with this name',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
     422: {
       description: 'Validation error',
       content: { 'application/json': { schema: ErrorSchema } },
@@ -1468,6 +1545,10 @@ registry.registerPath({
   path: '/api/v1/collections/{collectionId}',
   tags: ['Collections'],
   summary: 'Partial metadata update',
+  description:
+    'The slug is re-derived only when `name` is present in the body — a patch touching only ' +
+    '`description`/`isPublic` leaves the collection’s URL alone. A name colliding with another ' +
+    'of the caller’s collections is a 409.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ collectionId: z.string().uuid() }),
@@ -1492,6 +1573,10 @@ registry.registerPath({
     },
     404: {
       description: 'Collection not found',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    409: {
+      description: 'The caller already has a collection with this name',
       content: { 'application/json': { schema: ErrorSchema } },
     },
     422: {

@@ -9,6 +9,7 @@ import {
   deleteCollection,
   followCollection,
   getCollectionById,
+  getCollectionByUsernameAndSlug,
   getMyCollectionById,
   listCollectionsByUser,
   listMyCollections,
@@ -132,6 +133,17 @@ userCollectionsRouter.get(
   validate(userCollectionsParamsSchema, 'params'),
   validate(collectionQuerySchema, 'query'),
   asyncHandler(listCollectionsByUser),
+);
+// The SEO-friendly form of GET /collections/:collectionId — same public-only behaviour, addressed
+// by owner username + collection slug. Registered after /me/collections/:collectionId, which has
+// the same segment count and would otherwise be swallowed by the :username wildcard.
+//
+// No params schema: both params are plain strings, so neither can raise a Prisma P2023, and an
+// unknown value is already a clean 404 from the service — the same reasoning that leaves
+// GET /users/:username/recipes/:recipename unvalidated (see CLAUDE.md → Route Param Validation).
+userCollectionsRouter.get(
+  '/:username/collections/:slug',
+  asyncHandler(getCollectionByUsernameAndSlug),
 );
 
 export default router;

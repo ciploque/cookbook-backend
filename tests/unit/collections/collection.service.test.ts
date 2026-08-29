@@ -7,6 +7,7 @@ vi.mock('../../../src/config/database', () => ({
     },
     collection: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
@@ -24,11 +25,13 @@ vi.mock('../../../src/config/database', () => ({
   },
 }));
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../../src/config/database';
 import {
   listCollectionsByUser,
   listMyCollections,
   getCollectionById,
+  getCollectionByUsernameAndSlug,
   createCollection,
   updateCollection,
   patchCollection,
@@ -64,6 +67,7 @@ function buildCollectionRecipe(order: number, coverImageUrl: string | null) {
 const mockCollectionFull = {
   id: 'collection-uuid',
   ownerId: 'owner-uuid',
+  slug: 'my-favourites',
   name: 'My Favourites',
   description: 'Best recipes',
   isPublic: true,
@@ -343,6 +347,55 @@ describe('getCollectionById()', () => {
   });
 });
 
+// ─── getCollectionByUsernameAndSlug ───────────────────────────────────────────
+
+describe('getCollectionByUsernameAndSlug()', () => {
+  it('returns a public collection, matched on slug + owner username', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionFull as never);
+
+    const result = await getCollectionByUsernameAndSlug('joao', 'my-favourites');
+
+    expect(prisma.collection.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { slug: 'my-favourites', owner: { username: 'joao' } },
+      }),
+    );
+    expect(result).toHaveProperty('id', 'collection-uuid');
+    expect(result).toHaveProperty('slug', 'my-favourites');
+    expect(result.owner).not.toHaveProperty('authProviderId');
+  });
+
+  // Same shared shape as the id route — this is the SEO alias, not a second response format.
+  it('carries coverImages and recipeCount, exactly as the id route does', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+
+    const bySlug = await getCollectionByUsernameAndSlug('joao', 'my-favourites');
+    const byId = await getCollectionById('collection-uuid');
+
+    expect(bySlug).toEqual(byId);
+  });
+
+  it('throws COLLECTION_NOT_FOUND for a private collection', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockPrivateCollection as never);
+
+    await expect(getCollectionByUsernameAndSlug('joao', 'secret')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'COLLECTION_NOT_FOUND',
+    });
+  });
+
+  // An unknown username and an unknown slug are indistinguishable — one query, one 404.
+  it('throws COLLECTION_NOT_FOUND when neither the username nor the slug matches', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(null);
+
+    await expect(getCollectionByUsernameAndSlug('nobody', 'missing')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'COLLECTION_NOT_FOUND',
+    });
+  });
+});
+
 // ─── getMyCollectionById ──────────────────────────────────────────────────────
 
 describe('getMyCollectionById()', () => {
@@ -418,6 +471,45 @@ describe('createCollection()', () => {
 
     expect(prisma.collection.create).not.toHaveBeenCalled();
   });
+
+  it('derives the slug from the name', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
+    vi.mocked(prisma.collection.create).mockResolvedValue(mockCollectionFull as never);
+
+    await createCollection('user_owner', { name: 'Weeknight Dinners!', isPublic: true });
+
+    expect(prisma.collection.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ slug: 'weeknight-dinners' }),
+      }),
+    );
+  });
+
+  // The only unique constraint on Collection is [ownerId, slug], so P2002 can only mean the
+  // caller already has a collection under this name.
+  it('maps the [ownerId, slug] unique violation to 409 CONFLICT', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
+    vi.mocked(prisma.collection.create).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['ownerId', 'slug'] },
+      }),
+    );
+
+    await expect(
+      createCollection('user_owner', { name: 'My Favourites', isPublic: true }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+  });
+
+  it('re-throws an unexpected create error untouched', async () => {
+    vi.mocked(prisma.user.findUnique).mockResolvedValue(mockOwner as never);
+    vi.mocked(prisma.collection.create).mockRejectedValue(new Error('connection lost'));
+
+    await expect(
+      createCollection('user_owner', { name: 'My Favourites', isPublic: true }),
+    ).rejects.toThrow('connection lost');
+  });
 });
 
 // ─── updateCollection ─────────────────────────────────────────────────────────
@@ -454,6 +546,35 @@ describe('updateCollection()', () => {
       code: 'COLLECTION_NOT_FOUND',
     });
   });
+
+  // Unlike Recipe.slug, which is frozen at creation: a renamed collection gets a new URL so the
+  // slug never contradicts the title on the page.
+  it('re-derives the slug from the new name', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.update).mockResolvedValue(mockCollectionFull as never);
+
+    await updateCollection('collection-uuid', { name: 'Quick Suppers', isPublic: true });
+
+    expect(vi.mocked(prisma.collection.update).mock.calls[0][0].data).toMatchObject({
+      slug: 'quick-suppers',
+      name: 'Quick Suppers',
+    });
+  });
+
+  it('maps a slug collision with another of the owner’s collections to 409 CONFLICT', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.update).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['ownerId', 'slug'] },
+      }),
+    );
+
+    await expect(
+      updateCollection('collection-uuid', { name: 'Taken Name', isPublic: true }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+  });
 });
 
 // ─── patchCollection ──────────────────────────────────────────────────────────
@@ -472,6 +593,44 @@ describe('patchCollection()', () => {
     expect(updateData).toHaveProperty('isPublic', false);
     expect(updateData).not.toHaveProperty('name');
     expect(updateData).not.toHaveProperty('description');
+  });
+
+  // A patch that never mentions the name must not move the collection's public URL.
+  it('leaves the slug alone when the patch does not include a name', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.update).mockResolvedValue(mockCollectionFull as never);
+
+    await patchCollection('collection-uuid', { description: 'Only this' });
+
+    expect(vi.mocked(prisma.collection.update).mock.calls[0][0].data).not.toHaveProperty('slug');
+  });
+
+  it('re-derives the slug when the patch renames the collection', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.update).mockResolvedValue(mockCollectionFull as never);
+
+    await patchCollection('collection-uuid', { name: 'Quick Suppers' });
+
+    expect(vi.mocked(prisma.collection.update).mock.calls[0][0].data).toMatchObject({
+      slug: 'quick-suppers',
+      name: 'Quick Suppers',
+    });
+  });
+
+  it('maps a slug collision to 409 CONFLICT', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.update).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: { target: ['ownerId', 'slug'] },
+      }),
+    );
+
+    await expect(patchCollection('collection-uuid', { name: 'Taken Name' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+    });
   });
 });
 

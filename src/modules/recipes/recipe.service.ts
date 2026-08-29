@@ -22,6 +22,23 @@ import {
 
 const MAX_GALLERY_IMAGES = 10;
 
+// Recipe writes can violate two different unique constraints: @@unique([authorId, slug]) on the
+// recipe itself, and @@unique([recipeId, order]) on the steps created in the same transaction.
+// Only the first is a title conflict, so the target is inspected rather than blanket-mapped —
+// otherwise a duplicate step order would surface as "you already have a recipe with this title".
+// `meta.target` is a string[] of field names on some Prisma/connector combinations and the raw
+// constraint name ('recipes_authorId_slug_key') on others; stringifying covers both.
+function rethrowSlugConflict(err: unknown): never {
+  if (
+    err instanceof Prisma.PrismaClientKnownRequestError &&
+    err.code === 'P2002' &&
+    String(err.meta?.target).includes('slug')
+  ) {
+    throw ApiError.conflict('You already have a recipe with this title');
+  }
+  throw err;
+}
+
 const recipeFullInclude = {
   author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
   ingredients: { orderBy: { order: 'asc' as const } },
@@ -272,10 +289,7 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
       include: recipeFullInclude,
     });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-      throw ApiError.conflict('You already have a recipe with this title');
-    }
-    throw e;
+    rethrowSlugConflict(e);
   }
 
   const formatted = formatRecipeFull(recipe);
@@ -283,42 +297,52 @@ export async function createRecipe(authProviderId: string, input: CreateRecipeIn
   return formatted;
 }
 
+// The slug tracks the title: `title` is required on PUT, so every full update re-derives it and
+// the recipe's pretty URL always matches the title on the page. See the `Recipe.slug` bullet under
+// "Schema decisions" in CLAUDE.md for why that's preferred over freezing it at creation.
 export async function updateRecipe(recipeId: string, input: UpdateRecipeInput) {
   const tags = await upsertTags(input.tags);
   const categories = await resolveCategories(input.categories);
 
-  const recipe = await prisma.$transaction(async (tx) => {
-    await tx.recipeIngredient.deleteMany({ where: { recipeId } });
-    await tx.recipeStep.deleteMany({ where: { recipeId } });
-    await tx.recipeTag.deleteMany({ where: { recipeId } });
-    await tx.recipeCategory.deleteMany({ where: { recipeId } });
+  let recipe;
+  try {
+    recipe = await prisma.$transaction(async (tx) => {
+      await tx.recipeIngredient.deleteMany({ where: { recipeId } });
+      await tx.recipeStep.deleteMany({ where: { recipeId } });
+      await tx.recipeTag.deleteMany({ where: { recipeId } });
+      await tx.recipeCategory.deleteMany({ where: { recipeId } });
 
-    return tx.recipe.update({
-      where: { id: recipeId },
-      data: {
-        title: input.title,
-        description: input.description,
-        authorNote: input.authorNote,
-        videoUrl: input.videoUrl,
-        prepTimeMinutes: input.prepTimeMinutes,
-        servings: input.servings,
-        difficulty: input.difficulty,
-        ingredients: {
-          create: input.ingredients.map((ing, i) => ({ ...ing, order: i })),
+      return tx.recipe.update({
+        where: { id: recipeId },
+        data: {
+          slug: generateRecipeSlug(input.title),
+          title: input.title,
+          description: input.description,
+          authorNote: input.authorNote,
+          videoUrl: input.videoUrl,
+          prepTimeMinutes: input.prepTimeMinutes,
+          servings: input.servings,
+          difficulty: input.difficulty,
+          ingredients: {
+            create: input.ingredients.map((ing, i) => ({ ...ing, order: i })),
+          },
+          steps: {
+            create: input.steps,
+          },
+          recipeTags: {
+            create: tags.map((t) => ({ tagId: t.id })),
+          },
+          recipeCategories: {
+            create: categories.map((c) => ({ categoryId: c.id })),
+          },
         },
-        steps: {
-          create: input.steps,
-        },
-        recipeTags: {
-          create: tags.map((t) => ({ tagId: t.id })),
-        },
-        recipeCategories: {
-          create: categories.map((c) => ({ categoryId: c.id })),
-        },
-      },
-      include: recipeFullInclude,
+        include: recipeFullInclude,
+      });
     });
-  });
+  } catch (e) {
+    // Raised by the update inside the transaction, so nothing is half-written.
+    rethrowSlugConflict(e);
+  }
 
   const formatted = formatRecipeFull(recipe);
   void updateIndexedRecipe(toSearchDocument(formatted));
@@ -333,46 +357,56 @@ export async function patchRecipe(recipeId: string, input: PatchRecipeInput) {
   const categories =
     input.categories !== undefined ? await resolveCategories(input.categories) : undefined;
 
-  const recipe = await prisma.$transaction(async (tx) => {
-    if (input.ingredients !== undefined) {
-      await tx.recipeIngredient.deleteMany({ where: { recipeId } });
-    }
-    if (input.steps !== undefined) {
-      await tx.recipeStep.deleteMany({ where: { recipeId } });
-    }
-    if (tags !== undefined) {
-      await tx.recipeTag.deleteMany({ where: { recipeId } });
-    }
-    if (categories !== undefined) {
-      await tx.recipeCategory.deleteMany({ where: { recipeId } });
-    }
+  let recipe;
+  try {
+    recipe = await prisma.$transaction(async (tx) => {
+      if (input.ingredients !== undefined) {
+        await tx.recipeIngredient.deleteMany({ where: { recipeId } });
+      }
+      if (input.steps !== undefined) {
+        await tx.recipeStep.deleteMany({ where: { recipeId } });
+      }
+      if (tags !== undefined) {
+        await tx.recipeTag.deleteMany({ where: { recipeId } });
+      }
+      if (categories !== undefined) {
+        await tx.recipeCategory.deleteMany({ where: { recipeId } });
+      }
 
-    return tx.recipe.update({
-      where: { id: recipeId },
-      data: {
-        ...(input.title !== undefined && { title: input.title }),
-        ...(input.description !== undefined && { description: input.description }),
-        ...(input.authorNote !== undefined && { authorNote: input.authorNote }),
-        ...(input.videoUrl !== undefined && { videoUrl: input.videoUrl }),
-        ...(input.prepTimeMinutes !== undefined && { prepTimeMinutes: input.prepTimeMinutes }),
-        ...(input.servings !== undefined && { servings: input.servings }),
-        ...(input.difficulty !== undefined && { difficulty: input.difficulty }),
-        ...(input.ingredients !== undefined && {
-          ingredients: { create: input.ingredients.map((ing, i) => ({ ...ing, order: i })) },
-        }),
-        ...(input.steps !== undefined && {
-          steps: { create: input.steps },
-        }),
-        ...(tags !== undefined && {
-          recipeTags: { create: tags.map((t) => ({ tagId: t.id })) },
-        }),
-        ...(categories !== undefined && {
-          recipeCategories: { create: categories.map((c) => ({ categoryId: c.id })) },
-        }),
-      },
-      include: recipeFullInclude,
+      return tx.recipe.update({
+        where: { id: recipeId },
+        data: {
+          // Re-slugged only when the title is actually part of the patch — a PATCH touching only
+          // `servings` must not move the recipe's URL.
+          ...(input.title !== undefined && {
+            slug: generateRecipeSlug(input.title),
+            title: input.title,
+          }),
+          ...(input.description !== undefined && { description: input.description }),
+          ...(input.authorNote !== undefined && { authorNote: input.authorNote }),
+          ...(input.videoUrl !== undefined && { videoUrl: input.videoUrl }),
+          ...(input.prepTimeMinutes !== undefined && { prepTimeMinutes: input.prepTimeMinutes }),
+          ...(input.servings !== undefined && { servings: input.servings }),
+          ...(input.difficulty !== undefined && { difficulty: input.difficulty }),
+          ...(input.ingredients !== undefined && {
+            ingredients: { create: input.ingredients.map((ing, i) => ({ ...ing, order: i })) },
+          }),
+          ...(input.steps !== undefined && {
+            steps: { create: input.steps },
+          }),
+          ...(tags !== undefined && {
+            recipeTags: { create: tags.map((t) => ({ tagId: t.id })) },
+          }),
+          ...(categories !== undefined && {
+            recipeCategories: { create: categories.map((c) => ({ categoryId: c.id })) },
+          }),
+        },
+        include: recipeFullInclude,
+      });
     });
-  });
+  } catch (e) {
+    rethrowSlugConflict(e);
+  }
 
   const formatted = formatRecipeFull(recipe);
   void updateIndexedRecipe(toSearchDocument(formatted));

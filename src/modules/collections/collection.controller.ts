@@ -32,6 +32,15 @@ export async function getCollectionById(req: Request, res: Response): Promise<vo
   res.json({ success: true, data: collection });
 }
 
+// Same public-only behaviour as getCollectionById, reached by owner username + collection slug.
+export async function getCollectionByUsernameAndSlug(req: Request, res: Response): Promise<void> {
+  const collection = await collectionService.getCollectionByUsernameAndSlug(
+    req.params.username as string,
+    req.params.slug as string,
+  );
+  res.json({ success: true, data: collection });
+}
+
 export async function getMyCollectionById(req: Request, res: Response): Promise<void> {
   const collection = await collectionService.getMyCollectionById(
     req.params.collectionId as string,

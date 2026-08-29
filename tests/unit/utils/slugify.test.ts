@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { slugify, generateRecipeSlug } from '../../../src/utils/slugify';
+import { slugify, generateRecipeSlug, generateCollectionSlug } from '../../../src/utils/slugify';
 
 describe('slugify()', () => {
   it('lowercases text', () => {
@@ -51,5 +51,23 @@ describe('generateRecipeSlug()', () => {
     const slug2 = generateRecipeSlug('Same Title');
     expect(slug1).toBe('same-title');
     expect(slug2).toBe('same-title');
+  });
+});
+
+describe('generateCollectionSlug()', () => {
+  it('returns the slugified name', () => {
+    expect(generateCollectionSlug('Weeknight Dinners')).toBe('weeknight-dinners');
+  });
+
+  it('strips diacritics and punctuation the same way slugify does', () => {
+    expect(generateCollectionSlug('Café & Crème!')).toBe('cafe-creme');
+  });
+
+  // The one place it diverges from generateRecipeSlug: an empty slug would be unaddressable by
+  // GET /users/:username/collections/:slug, so it falls back to a constant.
+  it('falls back to "collection" when the name slugifies to nothing', () => {
+    expect(generateCollectionSlug('🍕🍔')).toBe('collection');
+    expect(generateCollectionSlug('!!!')).toBe('collection');
+    expect(generateCollectionSlug('')).toBe('collection');
   });
 });
