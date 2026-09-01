@@ -3,6 +3,10 @@ import { prisma } from '../../config/database';
 import { ApiError } from '../../utils/ApiError';
 import { buildMeta, toSkip } from '../../utils/pagination';
 import { generateCollectionSlug } from '../../utils/slugify';
+// The recipes module's public list-item contract — the same pair the shelves module renders
+// with. Importing it rather than re-declaring a select here is what keeps a collection's recipe
+// cards identical to the ones GET /recipes returns.
+import { formatRecipeListItem, recipeListSelect } from '../recipes/recipe.service';
 import {
   AddRecipesInput,
   CollectionQuery,
@@ -14,8 +18,7 @@ import {
 // Collection detail shows only the first 50 recipes — see CLAUDE.md Collections section.
 const MAX_INLINE_COLLECTION_RECIPES = 50;
 
-// Cover thumbnails for a collection card: the first 4 recipes by `order`, minus any without a
-// cover. Deliberately not backfilled from later recipes — position is what's meaningful here.
+// How many cover thumbnails a collection card shows.
 const COLLECTION_COVER_IMAGE_COUNT = 4;
 
 const collectionInclude = {
@@ -33,26 +36,76 @@ const collectionInclude = {
   _count: { select: { followers: true, recipes: true } },
 } satisfies Prisma.CollectionInclude;
 
-function formatCollection(
-  collection: Prisma.CollectionGetPayload<{ include: typeof collectionInclude }>,
-) {
-  const {
-    _count,
-    owner: { authProviderId: _ownerKey, ...ownerPublic },
-    recipes,
-    ...rest
-  } = collection;
+// The three single-collection GETs only. Same membership wrapper (collectionId/recipeId/order)
+// and the same 50-recipe cap — only the nested recipe grows, from a 4-field stub to the shared
+// list-item shape, so a collection page can render recipe cards without N follow-up fetches.
+// List and write responses stay on the light `collectionInclude` above: a page of 20
+// collections × 50 recipes each has no business carrying full list items.
+const collectionDetailInclude = {
+  ...collectionInclude,
+  recipes: {
+    orderBy: { order: 'asc' as const },
+    take: MAX_INLINE_COLLECTION_RECIPES,
+    select: {
+      collectionId: true,
+      recipeId: true,
+      order: true,
+      recipe: { select: recipeListSelect },
+    },
+  },
+} satisfies Prisma.CollectionInclude;
+
+// Card thumbnails: walk the loaded recipes in `order` and collect covers until there are 4 — a
+// coverless recipe is skipped rather than consuming one of the slots. Bounded by the
+// `take: MAX_INLINE_COLLECTION_RECIPES` window, so this comes up short only when fewer than 4
+// of the collection's first 50 members have a cover at all.
+function pickCoverImages(entries: { recipe: { coverImageUrl: string | null } }[]): string[] {
+  const covers: string[] = [];
+
+  for (const { recipe } of entries) {
+    if (recipe.coverImageUrl !== null) covers.push(recipe.coverImageUrl);
+    if (covers.length === COLLECTION_COVER_IMAGE_COUNT) break;
+  }
+
+  return covers;
+}
+
+// Everything on a collection response except `recipes`, which is the one field whose shape
+// differs between the detail reads and the rest.
+function formatCollectionBase<
+  T extends {
+    owner: { authProviderId: string };
+    recipes: { recipe: { coverImageUrl: string | null } }[];
+    _count: { followers: number; recipes: number };
+  },
+>(collection: T) {
+  const { _count, owner, recipes, ...rest } = collection;
+  const { authProviderId: _ownerKey, ...ownerPublic } = owner;
 
   return {
     ...rest,
-    recipes,
     owner: ownerPublic,
-    coverImages: recipes
-      .slice(0, COLLECTION_COVER_IMAGE_COUNT)
-      .map((entry) => entry.recipe.coverImageUrl)
-      .filter((url): url is string => url !== null),
+    coverImages: pickCoverImages(recipes),
     recipeCount: _count.recipes,
     followerCount: _count.followers,
+  };
+}
+
+function formatCollection(
+  collection: Prisma.CollectionGetPayload<{ include: typeof collectionInclude }>,
+) {
+  return { ...formatCollectionBase(collection), recipes: collection.recipes };
+}
+
+function formatCollectionDetail(
+  collection: Prisma.CollectionGetPayload<{ include: typeof collectionDetailInclude }>,
+) {
+  return {
+    ...formatCollectionBase(collection),
+    recipes: collection.recipes.map(({ recipe, ...entry }) => ({
+      ...entry,
+      recipe: formatRecipeListItem(recipe),
+    })),
   };
 }
 
@@ -116,12 +169,12 @@ export async function listMyCollections(authProviderId: string, query: Collectio
 export async function getCollectionById(collectionId: string) {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
-    include: collectionInclude,
+    include: collectionDetailInclude,
   });
 
   if (!collection || !collection.isPublic) throw ApiError.notFound('Collection');
 
-  return formatCollection(collection);
+  return formatCollectionDetail(collection);
 }
 
 // The SEO-friendly counterpart to getCollectionById: same public-only rule, addressed by the
@@ -132,12 +185,12 @@ export async function getCollectionById(collectionId: string) {
 export async function getCollectionByUsernameAndSlug(username: string, slug: string) {
   const collection = await prisma.collection.findFirst({
     where: { slug, owner: { username } },
-    include: collectionInclude,
+    include: collectionDetailInclude,
   });
 
   if (!collection || !collection.isPublic) throw ApiError.notFound('Collection');
 
-  return formatCollection(collection);
+  return formatCollectionDetail(collection);
 }
 
 // The owner-scoped counterpart: any collection the caller owns, public or private. A collection
@@ -146,14 +199,14 @@ export async function getCollectionByUsernameAndSlug(username: string, slug: str
 export async function getMyCollectionById(collectionId: string, authProviderId: string) {
   const collection = await prisma.collection.findUnique({
     where: { id: collectionId },
-    include: collectionInclude,
+    include: collectionDetailInclude,
   });
 
   if (!collection || collection.owner.authProviderId !== authProviderId) {
     throw ApiError.notFound('Collection');
   }
 
-  return formatCollection(collection);
+  return formatCollectionDetail(collection);
 }
 
 export async function createCollection(authProviderId: string, input: CreateCollectionInput) {

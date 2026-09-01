@@ -1035,8 +1035,8 @@ split apart instead of one route serving both.
 #### GET /users/me/collections/:collectionId
 
 The caller's own collection by id, in the exact [Collection Object Shape](#collection-object-shape)
-`GET /collections/:collectionId` returns — same 50-recipe cap, same `coverImages`/`recipeCount`.
-Public-ness is irrelevant here: the question this route answers is "is it mine", and the public route
+`GET /collections/:collectionId` returns — same 50-recipe cap, same `coverImages`/`recipeCount`,
+same list-item-shaped `recipes[].recipe`. Public-ness is irrelevant here: the question this route answers is "is it mine", and the public route
 already serves everyone else.
 
 A collection the caller doesn't own is a **`404`, not a `403`** — a non-owner shouldn't learn the id
@@ -1082,7 +1082,7 @@ collection is private — the three are deliberately indistinguishable.
 
 **Route registration order:** in `userCollectionsRouter` (`collection.router.ts`) the two `me` routes are registered **before** `GET /users/:userId/collections`, so the literal `me` segment isn't swallowed by the `:userId` wildcard — same pattern as `GET /users/:username/recipes/:recipename` vs `GET /users/:userId/recipes` in `recipe.router.ts`. `GET /:username/collections/:slug` is registered **last**, after `GET /me/collections/:collectionId`, with which it shares a segment count and would otherwise collide for a user whose username is literally `me` (the same pre-existing ambiguity the recipe routes carry). `/me/collections` genuinely needs its ordering; `/me/collections/:collectionId` vs `/:userId/collections` differ in segment count and couldn't collide, so that pair's order is for consistency.
 
-**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:username/collections/:slug` / `GET /users/:userId/collections` / `GET /users/me/collections` / `GET /users/me/collections/:collectionId`) includes at most the first 50 recipes, ordered by `order` — a hard cap in `collectionInclude` (`take: 50` in `collection.service.ts`), not full pagination. A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
+**Recipe count cap:** `GET /collections/:collectionId` (and the `recipes` array on every collection returned by `GET /users/:username/collections/:slug` / `GET /users/:userId/collections` / `GET /users/me/collections` / `GET /users/me/collections/:collectionId`) includes at most the first 50 recipes, ordered by `order` — a hard cap in both `collectionInclude` and `collectionDetailInclude` (`take: 50` in `collection.service.ts`), not full pagination. The cap is identical on both; the two includes differ only in how much of each recipe they select — see [Collection Object Shape](#collection-object-shape). A collection with more than 50 saved recipes will not expose the rest via these endpoints; a dedicated paginated sub-resource (`GET /collections/:collectionId/recipes`) would be needed to reach them. The cap is at least **observable**: `recipeCount` reports the true total, so a client can tell `recipes` was truncated instead of silently assuming `recipes.length` is the whole set.
 
 #### POST /collections — Request Body
 
@@ -1148,13 +1148,43 @@ into a taken slug is refused rather than silently suffixed.
 so the list endpoints and the write responses return it too, giving a client the SEO URL without a
 second fetch.
 
-**`coverImages`** is a card-preview convenience: the covers of the **first 4 recipes by `order`**
-(the same ordering `recipes` uses — `CollectionRecipe` has no `createdAt`, so `order` is the only
-ordering available). A recipe among those 4 with no cover is simply **omitted — never backfilled**
-from the 5th onward, so the array holds 0–4 entries and its length carries no information about
-`recipeCount`. Entries are `string`, never `null`, and are the same relative leading-slash paths
-as `coverImageUrl` everywhere else — the frontend prepends its own base/CDN URL (see
-[Cloudflare R2 Image Storage](#cloudflare-r2-image-storage)).
+**`recipes` has two shapes, and the membership wrapper is the half that never changes.** Every
+entry is `{ collectionId, recipeId, order, recipe }`, ordered by `order` and capped at 50. What
+differs is `recipe`:
+
+| Response | `recipe` |
+|---|---|
+| `GET /users/:userId/collections` · `GET /users/me/collections` · every write response (`POST`/`PUT`/`PATCH /collections`, the two `/recipes` sub-routes) | The 4-field stub above: `{ id, slug, title, coverImageUrl }` |
+| The three single-collection GETs — `GET /collections/:collectionId` · `GET /users/:username/collections/:slug` · `GET /users/me/collections/:collectionId` | The full [Recipe List Item Shape](#recipe-list-item-shape-get-recipes), identical to what `GET /recipes` returns |
+
+A collection page renders recipe cards, so the detail reads hand back everything a card needs —
+rating, prep time, author, tags, categories — instead of forcing N follow-up fetches. They get
+it by nesting `recipeListSelect` / `formatRecipeListItem` (exported from `recipe.service.ts`,
+the same pair [Shelves](#shelves) uses) under `recipes.recipe`, so a collection's cards can't
+drift from the ones on the search and profile pages. The list endpoints deliberately stay on the
+stub: a page of 20 collections × up to 50 recipes each would be an enormous payload for a card
+that shows a name and four thumbnails.
+
+**The same exception shelves carry applies here:** collection recipes do **not** include
+`isSavedInCollection`, even though `GET /recipes` list items do. `formatRecipeListItem` doesn't
+produce that field — it's attached one layer up, inside `listRecipes()`, from the caller's
+`req.user?.sub`. There's no equivalent step in the collection read path.
+
+**`coverImages`** is a card-preview convenience: recipe covers collected **in `order` until
+there are 4** (the same ordering `recipes` uses — `CollectionRecipe` has no `createdAt`, so
+`order` is the only ordering available). A coverless recipe is **skipped over, not counted
+against the 4** — the scan keeps walking, so a collection whose 2nd recipe has no cover still
+shows four thumbnails by reaching the 5th. It comes up short only when fewer than 4 of the
+**loaded 50** recipes have a cover at all; nothing beyond that window is consulted, which is
+what keeps this free of any extra query. So the array holds 0–4 entries and its length carries
+no information about `recipeCount`. Entries are `string`, never `null`, and are the same
+relative leading-slash paths as `coverImageUrl` everywhere else — the frontend prepends its own
+base/CDN URL (see [Cloudflare R2 Image Storage](#cloudflare-r2-image-storage)).
+
+> Previously this sliced the *first 4* entries and dropped the coverless ones, so a single
+> uncovered recipe near the top permanently cost the card a thumbnail even when the collection
+> had forty covered recipes. Position among the first four turned out to carry no meaning worth
+> that.
 
 **`recipeCount`** is the collection's **true** total membership, resolved as a Prisma `_count`
 over `CollectionRecipe` in the same query — deliberately not `recipes.length`, which is capped at
@@ -1255,7 +1285,8 @@ is ample). There is deliberately no in-process scheduler and no new npm dependen
 
 `items` uses the exact same shape as `GET /recipes` list items, via the `recipeListSelect` /
 `formatRecipeListItem` pair exported from `recipe.service.ts` — exported precisely so the
-two can't drift. `criteria` is authoring detail and is **not** exposed by the API.
+consumers can't drift. Shelves is one of two: the three single-collection GETs nest the same
+pair under `recipes[].recipe` (see [Collection Object Shape](#collection-object-shape)). `criteria` is authoring detail and is **not** exposed by the API.
 
 **One deliberate exception:** shelf items do **not** carry `isSavedInCollection`, even though
 `GET /recipes` list items do (see [Recipe List Item Shape](#recipe-list-item-shape-get-recipes)).
@@ -1835,7 +1866,7 @@ npm run test:watch        # watch mode
 npm run test:coverage     # coverage report
 ```
 
-### Unit Tests (583 passing)
+### Unit Tests (589 passing)
 
 Unit tests mock Prisma and all external dependencies — no database required. `vitest.config.ts` has no global `setupFiles` so unit tests run fully isolated.
 
@@ -1859,7 +1890,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 | `tests/unit/reviews/review.service.test.ts` | 36 | listReviewsByRecipe (pagination, recipe not found, `filter=rating:N`, `filter=media`, no filter, `order=rating_asc`/`rating_desc`/`newest`), createReview (success, user not found, recipe not found, duplicate, recomputes/syncs recipe rating stats), getMyReviewForRecipe (found via the `recipeId_authorId` unique, recipe/user/review not found), updateReview (updates rating+content, clears `content` when omitted, recomputes stats in the same `$transaction` + syncs Meilisearch, review not found), deleteReview (deletes + recomputes/syncs stats, deletes every attached image from storage, review not found), getReviewAuthorId (found, null), getReviewStats (recipe not found, totals from denormalized `reviewCount` + zero-filled rating breakdown + media count), addReviewImages (review not found, fast-path 10-image cap, `$executeRaw` guarded atomic append, race-loss cleanup of stored objects), removeReviewImages (review not found, removes given paths and deletes them from storage) |
 | `tests/unit/reviews/review.controller.test.ts` | 18 | Real review routers on a bare Express app, service mocked — the paginated envelope, `filter`/`order` forwarded and an unsupported `filter` rejected with 422, `GET /recipes/:recipeId/reviews/summary` not shadowed by the list route, `GET …/reviews/me` resolving the caller from the session and requiring auth (unlike its two sibling reads), `201` on create with the author from the session, a client-supplied `imageUrls` stripped, the duplicate-review conflict surfacing as 409, `recipeId` stripped from a `PUT` body so a review can't be moved between recipes, `403` before the service for a non-author, `204` on delete, and the image routes |
 | `tests/unit/reviews/review.schema.test.ts` | 16 | `createReviewSchema` — parses without `imageUrls`, strips an `imageUrls` field if passed (no longer part of the schema); `updateReviewSchema` — rating required (full replace, no partial), rejects out-of-range/non-integer ratings, `content` optional and capped at 2000, strips `recipeId`/`imageUrls`; `reviewQuerySchema` — `filter` accepts `rating:1`-`rating:5`/`media`, rejects out-of-range/arbitrary values, optional; `order` defaults to `newest`, accepts `rating_asc`/`rating_desc`, rejects invalid values |
-| `tests/unit/collections/collection.service.test.ts` | 55 | listCollectionsByUser (always public-filtered — including when the listed user is themselves the caller, pinned through a widened signature; the target user is looked up only to 404 an unknown id; user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (first 4 by `order` with uncovered ones omitted and **not** backfilled from the 5th, capped at 4, fewer-than-4, empty collection, none-of-the-first-4-covered, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query), getCollectionById (public, private → 404 **even for its owner**, not found, carries both shared-shape fields), getCollectionByUsernameAndSlug (matched on `{ slug, owner: { username } }`, byte-identical result to the id route, private → 404, unknown username *or* slug → the same 404), getMyCollectionById (own private, own public, another user's → 404 not 403, not found), createCollection (success, user not found, slug derived from the name, `[ownerId, slug]` `P2002` → 409, unexpected error re-thrown), updateCollection/patchCollection (metadata only, slug re-derived on rename, PATCH without `name` leaves `slug` out of the update entirely, collision → 409 on both), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
+| `tests/unit/collections/collection.service.test.ts` | 61 | listCollectionsByUser (always public-filtered — including when the listed user is themselves the caller, pinned through a widened signature; the target user is looked up only to 404 an unknown id; user not found), listMyCollections (all public+private for the authenticated owner, user not found), `coverImages`/`recipeCount` (covers collected in `order` **until 4**, skipping coverless recipes rather than spending a slot on them — including a scan reaching far past the first 4 entries; capped at 4, fewer-than-4 available, empty collection, no cover anywhere → `[]`, true total vs. the `take: 50`-capped `recipes` length, `recipes` still returned, `_count.recipes` requested in the same query, and a pin that the list endpoints keep the light 4-field recipe stub), getCollectionById (public, private → 404 **even for its owner**, not found, carries both shared-shape fields, each `recipes[].recipe` in the shared list-item shape with relations flattened / description truncated / **no** `isSavedInCollection`, and the include nesting the real `recipeListSelect` with `take: 50` intact), getCollectionByUsernameAndSlug (matched on `{ slug, owner: { username } }`, byte-identical result to the id route, private → 404, unknown username *or* slug → the same 404), getMyCollectionById (own private, own public, list-item recipes matching the public detail routes, another user's → 404 not 403, not found), createCollection (success, user not found, slug derived from the name, `[ownerId, slug]` `P2002` → 409, unexpected error re-thrown), updateCollection/patchCollection (metadata only, slug re-derived on rename, PATCH without `name` leaves `slug` out of the update entirely, collision → 409 on both), deleteCollection (success, not found), addRecipes/removeRecipes (incl. `take: 50` cap assertion, not-found-on-re-fetch race), followCollection (success, not found, private, own, duplicate), unfollowCollection, getOwnerId |
 | `tests/unit/routers/paramsValidation.test.ts` | 41 | Mounts the real routers on a bare Express app (services mocked). Malformed UUID → `422 VALIDATION_ERROR` on all 25 UUID param routes across recipes/reviews/collections/users/reports; the owner guard is never reached; well-formed UUIDs still hit the handler with the param intact; every `optionalAuthenticate` route (the four recipe ones) forwards the caller sub when a session is present and `undefined` when not (no Clerk middleware mounted — proves the route resolves rather than 401s), while the public profile/collection reads pass **no** caller at all, session or not; `GET /users/me`, `/users/me/collections`, `/users/me/collections/:collectionId`, `/users/username/:username`, `/users/:username/recipes/:recipename` and `/users/:username/collections/:slug` (both string params intact, not rejected by the sibling `:userId` uuid guard) still resolve (route-ordering + param-stripping regressions) |
 | `tests/unit/collections/collection.controller.test.ts` | 28 | Real collection routers on a bare Express app, service mocked — pins the HTTP contract: response envelope and status codes, **no** caller reaching the service on `GET /collections/:collectionId`, `GET /users/:username/collections/:slug` and `GET /users/:userId/collections` even with a session attached, the SEO route forwarding both string params / returning the id route's envelope / not swallowing `/users/me/collections/:collectionId` / surfacing the 404, `GET /users/me/collections/:collectionId` taking its sub from the session / 401ing without one / not being swallowed by the `:userId` wildcard / surfacing the not-mine 404, the `me` list route resolving from the session and never reaching the by-id lister, `recipes` stripped from a metadata PATCH, the owner guard blocking a non-owner before the service, and no owner guard on follow/unfollow |
 | `tests/unit/reports/report.service.test.ts` | 9 | createRecipeReport (success — asserts server-set `targetType: 'recipe'` and the resolved `reporterId`; recipe not found; **self-report → 403** before the reporter is even resolved; user not found; duplicate `P2002` → 409 CONFLICT; unexpected create error re-thrown), listMyReports (paginated shape, query scoped to the resolved reporter id, user not found) |
@@ -1882,6 +1913,7 @@ Unit tests mock Prisma and all external dependencies — no database required. `
 - Mock `../../../src/modules/tags/tag.service` to isolate tag upsert, and `../../../src/modules/categories/category.service` to isolate category resolution. Re-establish `resolveCategories`'s default (`mockResolvedValue([])`) in `beforeEach`: every recipe write path awaits it, and `vi.clearAllMocks()` does not restore an implementation a previous test made throw
 - Mock `../../../src/utils/slugify` to control slug output
 - Mock `../../../src/modules/recipes/recipe.search` in recipe service tests — prevents the Meilisearch import chain from triggering `env.ts` validation
+- Collection service tests need that same `recipe.search` mock **plus** `../../../src/config/env`, for the same reason at one remove: `collection.service.ts` imports `recipeListSelect`/`formatRecipeListItem` from `recipe.service.ts`, whose import chain reaches `env.ts` (which would `process.exit(1)` on unset vars). The two formatters themselves are used unmocked and asserted against — mocking `recipe.service` here would defeat the point of importing the real list-item contract
 - Shelf tests: mock `../../../src/config/env` (as `{ trustedImageDomains: [] }`) — `shelf.schema.ts` derives from `recipeQuerySchema`, whose import chain reaches `env.ts` and would `process.exit(1)`. Mock `../../../src/modules/shelves/resolvers` in the service test and `../../../src/modules/recipes/recipe.service` in the resolver test, so each layer is tested against a stub of the other
 - `vi.clearAllMocks()` resets calls but **not** implementations — a test that makes a mock throw must re-establish the default in `beforeEach`, or the throwing implementation leaks into the next test (see `shelf.service.test.ts`'s `parseCriteria` default)
 - Mock `../../../src/modules/storage/storage.service` in recipe service tests, and `../../../src/config/r2` (S3 client) + `../../../src/config/env` in storage service tests

@@ -133,7 +133,8 @@ function toSearchDocument(recipe: ReturnType<typeof formatRecipeFull>): RecipeSe
 }
 
 // Exported as this module's public list-item contract: the shelves module renders the same
-// abbreviated recipe shape, and duplicating the select/mapper there would let the two drift.
+// abbreviated recipe shape, and so do the three single-collection GETs — duplicating the
+// select/mapper in either place would let them drift.
 export const recipeListSelect = {
   id: true,
   slug: true,

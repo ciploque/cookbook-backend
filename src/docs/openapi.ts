@@ -240,7 +240,10 @@ const ReviewStatsSchema = registry.register(
   }),
 );
 
+// The membership wrapper. Shared by both collection shapes below — only the nested `recipe`
+// differs: a 4-field stub on list/write responses, a full RecipeListItem on the detail reads.
 const CollectionRecipeItemSchema = z.object({
+  collectionId: z.string().uuid(),
   recipeId: z.string().uuid(),
   order: z.number().int(),
   recipe: z.object({
@@ -249,6 +252,13 @@ const CollectionRecipeItemSchema = z.object({
     title: z.string(),
     coverImageUrl: z.string().nullable(),
   }),
+});
+
+const CollectionDetailRecipeItemSchema = z.object({
+  collectionId: z.string().uuid(),
+  recipeId: z.string().uuid(),
+  order: z.number().int(),
+  recipe: RecipeListItemSchema,
 });
 
 const CollectionOwnerSchema = z.object({
@@ -270,14 +280,26 @@ const CollectionSchema = registry.register(
     isPublic: z.boolean(),
     owner: CollectionOwnerSchema,
     recipes: z.array(CollectionRecipeItemSchema),
-    // Card thumbnails: covers of the first 4 recipes by `order`. Recipes without a cover are
-    // omitted rather than backfilled, so this holds 0–4 entries and never a null.
+    // Card thumbnails: recipe covers collected in `order` until there are 4. A coverless recipe
+    // is skipped rather than consuming a slot, so this holds 0–4 entries and never a null, and
+    // comes up short only when fewer than 4 of the loaded 50 recipes have a cover.
     coverImages: z.array(z.string()),
     // Total membership — unaffected by the 50-recipe cap on `recipes`.
     recipeCount: z.number().int(),
     followerCount: z.number().int(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
+  }),
+);
+
+// The three single-collection GETs only — GET /collections/{collectionId},
+// GET /users/{username}/collections/{slug} and GET /users/me/collections/{collectionId}. Plain
+// Collection stays on the 4-field recipe stub: it's shared by the two list endpoints and every
+// write response, where full list items would balloon the payload for no reader.
+const CollectionDetailSchema = registry.register(
+  'CollectionDetail',
+  CollectionSchema.extend({
+    recipes: z.array(CollectionDetailRecipeItemSchema),
   }),
 );
 
@@ -1377,7 +1399,7 @@ registry.registerPath({
       description: 'Collection detail',
       content: {
         'application/json': {
-          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+          schema: z.object({ success: z.literal(true), data: CollectionDetailSchema }),
         },
       },
     },
@@ -1412,7 +1434,7 @@ registry.registerPath({
       description: 'Collection detail',
       content: {
         'application/json': {
-          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+          schema: z.object({ success: z.literal(true), data: CollectionDetailSchema }),
         },
       },
     },
@@ -1446,7 +1468,7 @@ registry.registerPath({
       description: 'Collection detail',
       content: {
         'application/json': {
-          schema: z.object({ success: z.literal(true), data: CollectionSchema }),
+          schema: z.object({ success: z.literal(true), data: CollectionDetailSchema }),
         },
       },
     },

@@ -1,5 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+// The service now imports recipeListSelect/formatRecipeListItem from the recipes module, whose
+// import chain reaches config/env (which would process.exit(1) on unset vars) via
+// recipe.search -> config/meilisearch. Same reasoning as the shelves suite's env mock.
+vi.mock('../../../src/config/env', () => ({
+  env: { NODE_ENV: 'test', MEILISEARCH_URL: 'http://localhost:7700', MEILISEARCH_API_KEY: 'key' },
+  allowedOrigins: [],
+  trustedImageDomains: [] as string[],
+}));
+vi.mock('../../../src/modules/recipes/recipe.search', () => ({
+  indexRecipe: vi.fn(),
+  updateIndexedRecipe: vi.fn(),
+  updateIndexedRecipeRating: vi.fn(),
+  deleteIndexedRecipe: vi.fn(),
+  searchRecipesViaMeili: vi.fn(),
+}));
+
 vi.mock('../../../src/config/database', () => ({
   prisma: {
     user: {
@@ -43,6 +59,9 @@ import {
   getOwnerId,
   getMyCollectionById,
 } from '../../../src/modules/collections/collection.service';
+// The detail reads nest this verbatim — asserting against the real export is what keeps the
+// collection's recipe cards from drifting away from GET /recipes'.
+import { recipeListSelect } from '../../../src/modules/recipes/recipe.service';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +73,7 @@ const mockOwner = {
   avatarUrl: null,
 };
 
+// The light nested recipe returned by the list endpoints and every write response.
 function buildCollectionRecipe(order: number, coverImageUrl: string | null) {
   const recipeId = `recipe-uuid-${order}`;
   return {
@@ -61,6 +81,36 @@ function buildCollectionRecipe(order: number, coverImageUrl: string | null) {
     recipeId,
     order,
     recipe: { id: recipeId, slug: `pasta-${order}`, title: `Pasta ${order}`, coverImageUrl },
+  };
+}
+
+// The recipeListSelect payload the three single-collection GETs load — same membership wrapper,
+// a full recipe underneath. Mirrors what Prisma returns for `collectionDetailInclude`, so
+// formatRecipeListItem has the relation rows it flattens (recipeTags/recipeCategories).
+function buildDetailCollectionRecipe(order: number, coverImageUrl: string | null) {
+  const recipeId = `recipe-uuid-${order}`;
+  return {
+    collectionId: 'collection-uuid',
+    recipeId,
+    order,
+    recipe: {
+      id: recipeId,
+      slug: `pasta-${order}`,
+      title: `Pasta ${order}`,
+      description: 'x'.repeat(250),
+      authorNote: 'A note',
+      coverImageUrl,
+      imageUrls: [],
+      videoUrl: null,
+      prepTimeMinutes: 15,
+      difficulty: 2,
+      averageRating: 4.5,
+      reviewCount: 8,
+      createdAt: new Date('2024-01-01'),
+      author: { id: 'owner-uuid', username: 'joao', displayName: 'João' },
+      recipeTags: [{ tag: { id: 't1', name: 'Pasta', slug: 'pasta' } }],
+      recipeCategories: [{ category: { id: 'c1', name: 'Mains', slug: 'mains' } }],
+    },
   };
 }
 
@@ -80,8 +130,8 @@ const mockCollectionFull = {
     avatarUrl: null,
     authProviderId: 'user_owner',
   },
-  // 5 entries, the 2nd without a cover — exercises both the 4-item slice and the "omit, don't
-  // backfill" rule for coverImages.
+  // 5 entries, the 2nd without a cover — a coverless recipe must be skipped over rather than
+  // consume one of the 4 cover slots, so the 5th recipe's cover is pulled in to complete the set.
   recipes: [
     buildCollectionRecipe(0, '/recipes/r1/cover/a.jpg'),
     buildCollectionRecipe(1, null),
@@ -95,6 +145,26 @@ const mockCollectionFull = {
 
 const mockPrivateCollection = {
   ...mockCollectionFull,
+  id: 'private-uuid',
+  isPublic: false,
+  _count: { followers: 0, recipes: 12 },
+};
+
+// The same collection as Prisma returns it for the three detail GETs: identical everywhere
+// except that each `recipes[].recipe` is the fuller recipeListSelect payload.
+const mockCollectionDetail = {
+  ...mockCollectionFull,
+  recipes: [
+    buildDetailCollectionRecipe(0, '/recipes/r1/cover/a.jpg'),
+    buildDetailCollectionRecipe(1, null),
+    buildDetailCollectionRecipe(2, '/recipes/r3/cover/c.jpg'),
+    buildDetailCollectionRecipe(3, '/recipes/r4/cover/d.jpg'),
+    buildDetailCollectionRecipe(4, '/recipes/r5/cover/e.jpg'),
+  ],
+};
+
+const mockPrivateCollectionDetail = {
+  ...mockCollectionDetail,
   id: 'private-uuid',
   isPublic: false,
   _count: { followers: 0, recipes: 12 },
@@ -210,15 +280,50 @@ describe('coverImages + recipeCount', () => {
     return result.data[0];
   }
 
-  it('takes the covers of the first 4 recipes by order, omitting those without one', async () => {
+  it('walks the recipes in order, skipping coverless ones, until it has 4 covers', async () => {
     const item = await listOne(mockCollectionFull);
 
-    // The 2nd recipe has no cover, so it is dropped — and the 5th is NOT pulled in to backfill.
+    // The 2nd recipe has no cover, so it is skipped and the 5th completes the set — a coverless
+    // recipe must not consume one of the 4 slots and leave the card half-empty.
     expect(item.coverImages).toEqual([
       '/recipes/r1/cover/a.jpg',
       '/recipes/r3/cover/c.jpg',
       '/recipes/r4/cover/d.jpg',
+      '/recipes/r5/cover/e.jpg',
     ]);
+  });
+
+  // The scan has no window of its own — it runs to the end of the loaded recipes if it must.
+  it('reaches well past the first 4 entries to complete the set', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [
+        buildCollectionRecipe(0, '/a.jpg'),
+        ...[1, 2, 3, 4, 5, 6].map((i) => buildCollectionRecipe(i, null)),
+        buildCollectionRecipe(7, '/b.jpg'),
+        buildCollectionRecipe(8, null),
+        buildCollectionRecipe(9, '/c.jpg'),
+        buildCollectionRecipe(10, '/d.jpg'),
+        buildCollectionRecipe(11, '/e.jpg'),
+      ],
+    });
+
+    expect(item.coverImages).toEqual(['/a.jpg', '/b.jpg', '/c.jpg', '/d.jpg']);
+  });
+
+  // Bounded by the take:50 window the recipes array is loaded with — nothing beyond it is
+  // consulted, so a collection whose loaded members are all coverless stays short.
+  it('comes up short when the loaded recipes hold fewer than 4 covers', async () => {
+    const item = await listOne({
+      ...mockCollectionFull,
+      recipes: [
+        buildCollectionRecipe(0, null),
+        buildCollectionRecipe(1, '/only.jpg'),
+        buildCollectionRecipe(2, null),
+      ],
+    });
+
+    expect(item.coverImages).toEqual(['/only.jpg']);
   });
 
   it('caps at 4 even when every one of the first recipes has a cover', async () => {
@@ -258,10 +363,10 @@ describe('coverImages + recipeCount', () => {
     expect(item.recipeCount).toBe(0);
   });
 
-  it('returns an empty array when none of the first 4 recipes has a cover', async () => {
+  it('returns an empty array when no loaded recipe has a cover at all', async () => {
     const item = await listOne({
       ...mockCollectionFull,
-      recipes: [0, 1, 2, 3].map((i) => buildCollectionRecipe(i, null)),
+      recipes: [0, 1, 2, 3, 4, 5].map((i) => buildCollectionRecipe(i, null)),
     });
 
     expect(item.coverImages).toEqual([]);
@@ -281,6 +386,27 @@ describe('coverImages + recipeCount', () => {
     expect(item).toHaveProperty('followerCount', 3);
   });
 
+  // Only the three single-collection GETs carry the full list item. A page of 20 collections ×
+  // up to 50 recipes each must not quietly grow into that shape.
+  it('keeps the light 4-field recipe stub on the list endpoints', async () => {
+    const item = await listOne(mockCollectionFull);
+
+    expect(item.recipes[0].recipe).toEqual({
+      id: 'recipe-uuid-0',
+      slug: 'pasta-0',
+      title: 'Pasta 0',
+      coverImageUrl: '/recipes/r1/cover/a.jpg',
+    });
+
+    const include = vi.mocked(prisma.collection.findMany).mock.calls[0][0]?.include;
+    expect(include?.recipes).toMatchObject({
+      take: 50,
+      include: {
+        recipe: { select: { id: true, slug: true, title: true, coverImageUrl: true } },
+      },
+    });
+  });
+
   it('asks Prisma for the recipe count in the same query', async () => {
     await listOne(mockCollectionFull);
 
@@ -293,7 +419,7 @@ describe('coverImages + recipeCount', () => {
 
 describe('getCollectionById()', () => {
   it('returns a public collection to anyone', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
 
     const result = await getCollectionById('collection-uuid');
 
@@ -301,9 +427,61 @@ describe('getCollectionById()', () => {
     expect(result.owner).not.toHaveProperty('authProviderId');
   });
 
+  // The detail reads render recipe cards, so each membership entry carries the same abbreviated
+  // recipe GET /recipes returns — relations flattened to slug arrays, description truncated.
+  it('returns each recipe in the shared list-item shape', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
+
+    const result = await getCollectionById('collection-uuid');
+
+    // The membership wrapper is unchanged — only what hangs off `recipe` grew.
+    expect(result.recipes[0]).toMatchObject({
+      collectionId: 'collection-uuid',
+      recipeId: 'recipe-uuid-0',
+      order: 0,
+    });
+    expect(result.recipes[0].recipe).toMatchObject({
+      id: 'recipe-uuid-0',
+      slug: 'pasta-0',
+      title: 'Pasta 0',
+      authorNote: 'A note',
+      prepTimeMinutes: 15,
+      difficulty: 2,
+      averageRating: 4.5,
+      reviewCount: 8,
+      author: { id: 'owner-uuid', username: 'joao', displayName: 'João' },
+      tags: ['pasta'],
+      categories: ['mains'],
+    });
+    expect(result.recipes[0].recipe.description).toHaveLength(200);
+    // Resolved from the caller's own sub one layer up in listRecipes(), which has no counterpart
+    // here — same reason shelf items don't carry it either.
+    expect(result.recipes[0].recipe).not.toHaveProperty('isSavedInCollection');
+    expect(result.recipes[0].recipe).not.toHaveProperty('recipeTags');
+    expect(result.recipes[0].recipe).not.toHaveProperty('recipeCategories');
+  });
+
+  it('loads the recipes through the shared recipe list select, still capped at 50', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
+
+    await getCollectionById('collection-uuid');
+
+    const include = vi.mocked(prisma.collection.findUnique).mock.calls[0][0]?.include;
+    expect(include?.recipes).toMatchObject({
+      take: 50,
+      orderBy: { order: 'asc' },
+      select: {
+        collectionId: true,
+        recipeId: true,
+        order: true,
+        recipe: { select: recipeListSelect },
+      },
+    });
+  });
+
   // The two fields live on the shared Collection shape, so the detail GET carries them too.
   it('carries coverImages and recipeCount on the detail response', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
 
     const result = await getCollectionById('collection-uuid');
 
@@ -311,12 +489,13 @@ describe('getCollectionById()', () => {
       '/recipes/r1/cover/a.jpg',
       '/recipes/r3/cover/c.jpg',
       '/recipes/r4/cover/d.jpg',
+      '/recipes/r5/cover/e.jpg',
     ]);
     expect(result.recipeCount).toBe(12);
   });
 
   it('throws COLLECTION_NOT_FOUND for a private collection', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollectionDetail as never);
 
     await expect(getCollectionById('private-uuid')).rejects.toMatchObject({
       statusCode: 404,
@@ -327,7 +506,7 @@ describe('getCollectionById()', () => {
   // No caller can unlock a private collection here — not even its owner, who reads it through
   // getMyCollectionById() on an authenticated route instead.
   it('404s a private collection even when its owner is the caller', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollectionDetail as never);
 
     await expect(
       (getCollectionById as (id: string, sub?: string) => Promise<unknown>)(
@@ -351,7 +530,7 @@ describe('getCollectionById()', () => {
 
 describe('getCollectionByUsernameAndSlug()', () => {
   it('returns a public collection, matched on slug + owner username', async () => {
-    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionDetail as never);
 
     const result = await getCollectionByUsernameAndSlug('joao', 'my-favourites');
 
@@ -366,18 +545,20 @@ describe('getCollectionByUsernameAndSlug()', () => {
   });
 
   // Same shared shape as the id route — this is the SEO alias, not a second response format.
-  it('carries coverImages and recipeCount, exactly as the id route does', async () => {
-    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionFull as never);
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+  // Byte-identical results also pin that both routes got the list-item recipes, not just one.
+  it('carries coverImages, recipeCount and list-item recipes, exactly as the id route does', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionDetail as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
 
     const bySlug = await getCollectionByUsernameAndSlug('joao', 'my-favourites');
     const byId = await getCollectionById('collection-uuid');
 
     expect(bySlug).toEqual(byId);
+    expect(bySlug.recipes[0].recipe).toMatchObject({ tags: ['pasta'], categories: ['mains'] });
   });
 
   it('throws COLLECTION_NOT_FOUND for a private collection', async () => {
-    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockPrivateCollection as never);
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockPrivateCollectionDetail as never);
 
     await expect(getCollectionByUsernameAndSlug('joao', 'secret')).rejects.toMatchObject({
       statusCode: 404,
@@ -400,7 +581,7 @@ describe('getCollectionByUsernameAndSlug()', () => {
 
 describe('getMyCollectionById()', () => {
   it('returns the caller’s own private collection', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollection as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockPrivateCollectionDetail as never);
 
     const result = await getMyCollectionById('private-uuid', 'user_owner');
 
@@ -409,7 +590,7 @@ describe('getMyCollectionById()', () => {
   });
 
   it('returns the caller’s own public collection too', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
 
     const result = await getMyCollectionById('collection-uuid', 'user_owner');
 
@@ -417,10 +598,24 @@ describe('getMyCollectionById()', () => {
     expect(result.recipeCount).toBe(12);
   });
 
+  // The third detail read — same recipe shape as the two public ones.
+  it('returns list-item recipes, exactly as the public detail routes do', async () => {
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
+
+    const result = await getMyCollectionById('collection-uuid', 'user_owner');
+
+    expect(result.recipes[0]).toMatchObject({ recipeId: 'recipe-uuid-0', order: 0 });
+    expect(result.recipes[0].recipe).toMatchObject({
+      averageRating: 4.5,
+      tags: ['pasta'],
+      categories: ['mains'],
+    });
+  });
+
   // 404, not 403: a non-owner shouldn't learn the id exists. Public-ness is irrelevant here —
   // this route answers "is it mine", and the public one already serves everyone else.
   it('404s a collection owned by somebody else, public or not', async () => {
-    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionFull as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
 
     await expect(getMyCollectionById('collection-uuid', 'user_other')).rejects.toMatchObject({
       statusCode: 404,
