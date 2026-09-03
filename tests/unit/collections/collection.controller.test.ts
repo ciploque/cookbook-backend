@@ -19,6 +19,7 @@ vi.mock('../../../src/modules/collections/collection.service', () => ({
   getCollectionById: vi.fn(),
   getCollectionByUsernameAndSlug: vi.fn(),
   getMyCollectionById: vi.fn(),
+  getMyCollectionBySlug: vi.fn(),
   createCollection: vi.fn(),
   updateCollection: vi.fn(),
   patchCollection: vi.fn(),
@@ -203,6 +204,63 @@ describe('GET /users/me/collections/:collectionId', () => {
 
     const res = await api()
       .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('COLLECTION_NOT_FOUND');
+  });
+});
+
+describe('GET /users/me/collections/slug/:slug', () => {
+  it('resolves the owner from the session and forwards the slug', async () => {
+    vi.mocked(collectionService.getMyCollectionBySlug).mockResolvedValue(collection as never);
+
+    const res = await api()
+      .get('/users/me/collections/slug/weeknight-dinners')
+      .set(...AUTH);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: collection });
+    expect(collectionService.getMyCollectionBySlug).toHaveBeenCalledWith(
+      'weeknight-dinners',
+      'user_owner',
+    );
+  });
+
+  it('requires a session', async () => {
+    const res = await api().get('/users/me/collections/slug/weeknight-dinners');
+
+    expect(res.status).toBe(401);
+    expect(collectionService.getMyCollectionBySlug).not.toHaveBeenCalled();
+  });
+
+  // Four segments against the id route's three — the literal `slug` segment is what makes this
+  // route immune to the ordering hazards the rest of this router has to reason about.
+  it('neither swallows nor is swallowed by the by-id and public slug routes', async () => {
+    vi.mocked(collectionService.getMyCollectionById).mockResolvedValue(collection as never);
+    vi.mocked(collectionService.getMyCollectionBySlug).mockResolvedValue(collection as never);
+
+    await api()
+      .get(`/users/me/collections/${COLLECTION_ID}`)
+      .set(...AUTH);
+    expect(collectionService.getMyCollectionBySlug).not.toHaveBeenCalled();
+
+    await api()
+      .get('/users/me/collections/slug/weeknight-dinners')
+      .set(...AUTH);
+    expect(collectionService.getMyCollectionById).toHaveBeenCalledTimes(1);
+    expect(collectionService.getCollectionByUsernameAndSlug).not.toHaveBeenCalled();
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the not-mine 404 as the error envelope', async () => {
+    const { ApiError } = await import('../../../src/utils/ApiError');
+    vi.mocked(collectionService.getMyCollectionBySlug).mockRejectedValue(
+      ApiError.notFound('Collection'),
+    );
+
+    const res = await api()
+      .get('/users/me/collections/slug/someone-elses')
       .set(...AUTH);
 
     expect(res.status).toBe(404);

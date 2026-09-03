@@ -39,6 +39,7 @@ vi.mock('../../../src/modules/collections/collection.service', () => ({
   getCollectionById: vi.fn(async () => ({ id: 'ok' })),
   getCollectionByUsernameAndSlug: vi.fn(async () => ({ id: 'ok' })),
   getMyCollectionById: vi.fn(async () => ({ id: 'ok' })),
+  getMyCollectionBySlug: vi.fn(async () => ({ id: 'ok' })),
   listCollectionsByUser: vi.fn(async () => ({ data: [], meta: {} })),
   listMyCollections: vi.fn(async () => ({ data: [], meta: {} })),
   followCollection: vi.fn(async () => undefined),
@@ -289,6 +290,21 @@ describe('non-uuid routes are unaffected', () => {
     expect(res.status).toBe(200);
     // Public: no auth middleware, so the username is all the service ever receives.
     expect(userService.getUserByUsername).toHaveBeenCalledWith('joao');
+  });
+
+  // One plain-string param, so no params schema — and at four segments neither the
+  // /me/collections/:collectionId uuid guard nor the /:userId one can claim it first.
+  it('GET /users/me/collections/slug/:slug keeps the slug and takes the sub from the session', async () => {
+    const res = await api()
+      .get('/users/me/collections/slug/weeknight-dinners')
+      .set(...AUTH);
+    expect(res.status).toBe(200);
+    expect(collectionService.getMyCollectionBySlug).toHaveBeenCalledWith(
+      'weeknight-dinners',
+      'dev-user',
+    );
+    expect(collectionService.getMyCollectionById).not.toHaveBeenCalled();
+    expect(collectionService.listCollectionsByUser).not.toHaveBeenCalled();
   });
 
   it('GET /users/me/collections is not swallowed by the :userId uuid guard', async () => {

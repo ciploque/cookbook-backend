@@ -1420,6 +1420,41 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/api/v1/users/me/collections/slug/{slug}',
+  tags: ['Collections'],
+  summary: 'Get one of the authenticated user’s own collections by slug',
+  description:
+    'The by-slug form of GET /users/me/collections/{collectionId} — identical behaviour and ' +
+    'response shape, for a client that has the collection’s URL slug but not its id. Returns ' +
+    'the caller’s own collection whether it is public or private; a slug that is not theirs is ' +
+    'a 404, not a 403. The slug is re-derived whenever the collection is renamed, so a link ' +
+    'minted before a rename no longer resolves.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ slug: z.string() }),
+  },
+  responses: {
+    200: {
+      description: 'Collection detail',
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: CollectionDetailSchema }),
+        },
+      },
+    },
+    401: {
+      description: 'Missing or invalid token',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+    404: {
+      description: 'No collection with that slug owned by the caller',
+      content: { 'application/json': { schema: ErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/api/v1/collections/{collectionId}',
   tags: ['Collections'],
   summary: 'Get public collection by ID',

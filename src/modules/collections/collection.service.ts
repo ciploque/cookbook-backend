@@ -209,6 +209,22 @@ export async function getMyCollectionById(collectionId: string, authProviderId: 
   return formatCollectionDetail(collection);
 }
 
+// The by-slug form of getMyCollectionById, for a frontend that lands on a collection URL with
+// only the slug in hand. Ownership lives in the `where` rather than in a post-fetch comparison —
+// the same one-query shape getCollectionByUsernameAndSlug uses — so somebody else's slug is
+// simply a miss, and therefore a 404 rather than a 403. isPublic is deliberately not consulted:
+// this is the caller's own shelf.
+export async function getMyCollectionBySlug(slug: string, authProviderId: string) {
+  const collection = await prisma.collection.findFirst({
+    where: { slug, owner: { authProviderId } },
+    include: collectionDetailInclude,
+  });
+
+  if (!collection) throw ApiError.notFound('Collection');
+
+  return formatCollectionDetail(collection);
+}
+
 export async function createCollection(authProviderId: string, input: CreateCollectionInput) {
   const owner = await prisma.user.findUnique({ where: { authProviderId } });
   if (!owner) throw ApiError.notFound('User');

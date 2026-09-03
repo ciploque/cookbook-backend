@@ -49,6 +49,16 @@ export async function getMyCollectionById(req: Request, res: Response): Promise<
   res.json({ success: true, data: collection });
 }
 
+// Same owner-scoped read as getMyCollectionById, addressed by slug — the form a frontend can
+// build from the URL alone, without first resolving the collection's id.
+export async function getMyCollectionBySlug(req: Request, res: Response): Promise<void> {
+  const collection = await collectionService.getMyCollectionBySlug(
+    req.params.slug as string,
+    req.user!.sub,
+  );
+  res.json({ success: true, data: collection });
+}
+
 export async function createCollection(req: Request, res: Response): Promise<void> {
   const collection = await collectionService.createCollection(
     req.user!.sub,

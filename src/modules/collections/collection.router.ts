@@ -11,6 +11,7 @@ import {
   getCollectionById,
   getCollectionByUsernameAndSlug,
   getMyCollectionById,
+  getMyCollectionBySlug,
   listCollectionsByUser,
   listMyCollections,
   patchCollection,
@@ -126,6 +127,19 @@ userCollectionsRouter.get(
   authenticate,
   validate(collectionParamsSchema, 'params'),
   asyncHandler(getMyCollectionById),
+);
+// The by-slug form of the route above, for a frontend that lands on a collection URL knowing
+// only the slug. The literal `slug` segment is what keeps this unambiguous: at four segments it
+// can be shadowed by neither /me/collections/:collectionId nor /:username/collections/:slug,
+// which are three, so its position in this file carries no ordering hazard.
+//
+// No params schema, for the same reason /:username/collections/:slug has none: :slug is a plain
+// string, so it can't raise a Prisma P2023, and an unknown value is already a clean 404 from the
+// service (see CLAUDE.md → Route Param Validation).
+userCollectionsRouter.get(
+  '/me/collections/slug/:slug',
+  authenticate,
+  asyncHandler(getMyCollectionBySlug),
 );
 // Fully public — no auth middleware, public collections only, the same list for every caller.
 userCollectionsRouter.get(

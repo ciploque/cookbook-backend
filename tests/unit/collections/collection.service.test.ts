@@ -58,6 +58,7 @@ import {
   unfollowCollection,
   getOwnerId,
   getMyCollectionById,
+  getMyCollectionBySlug,
 } from '../../../src/modules/collections/collection.service';
 // The detail reads nest this verbatim — asserting against the real export is what keeps the
 // collection's recipe cards from drifting away from GET /recipes'.
@@ -627,6 +628,65 @@ describe('getMyCollectionById()', () => {
     vi.mocked(prisma.collection.findUnique).mockResolvedValue(null);
 
     await expect(getMyCollectionById('missing-id', 'user_owner')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'COLLECTION_NOT_FOUND',
+    });
+  });
+});
+
+// ─── getMyCollectionBySlug ────────────────────────────────────────────────────
+
+describe('getMyCollectionBySlug()', () => {
+  // Ownership lives in the where clause, not in a post-fetch comparison — which is what makes a
+  // stranger's slug a miss (and therefore a 404) rather than a row to reject.
+  it('scopes the lookup to the caller in a single findFirst', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionDetail as never);
+
+    await getMyCollectionBySlug('my-favourites', 'user_owner');
+
+    expect(prisma.collection.findFirst).toHaveBeenCalledTimes(1);
+    expect(prisma.collection.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { slug: 'my-favourites', owner: { authProviderId: 'user_owner' } },
+      }),
+    );
+  });
+
+  it('returns the caller’s own private collection', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockPrivateCollectionDetail as never);
+
+    const result = await getMyCollectionBySlug('secret', 'user_owner');
+
+    expect(result).toHaveProperty('id', 'private-uuid');
+    expect(result.owner).not.toHaveProperty('authProviderId');
+  });
+
+  it('returns the caller’s own public collection too', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionDetail as never);
+
+    const result = await getMyCollectionBySlug('my-favourites', 'user_owner');
+
+    expect(result).toHaveProperty('id', 'collection-uuid');
+    expect(result.recipeCount).toBe(12);
+  });
+
+  // The by-slug form is an alias, not a second response format — byte-identical to the by-id one.
+  it('returns exactly what getMyCollectionById does', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(mockCollectionDetail as never);
+    vi.mocked(prisma.collection.findUnique).mockResolvedValue(mockCollectionDetail as never);
+
+    const bySlug = await getMyCollectionBySlug('my-favourites', 'user_owner');
+    const byId = await getMyCollectionById('collection-uuid', 'user_owner');
+
+    expect(bySlug).toEqual(byId);
+    expect(bySlug.recipes[0].recipe).toMatchObject({ tags: ['pasta'], categories: ['mains'] });
+  });
+
+  // Somebody else's slug and a slug nobody has are the same answer: the query matched no row.
+  it('throws COLLECTION_NOT_FOUND when no collection of the caller’s has that slug', async () => {
+    vi.mocked(prisma.collection.findFirst).mockResolvedValue(null);
+
+    await expect(getMyCollectionBySlug('someone-elses', 'user_owner')).rejects.toMatchObject({
       statusCode: 404,
       code: 'COLLECTION_NOT_FOUND',
     });
